@@ -24,7 +24,31 @@ class HandlerTests(unittest.TestCase):
         self.assertFalse(response["isBase64Encoded"])
 
     def test_supported_pr_is_not_acknowledged_as_queued(self):
-        self.assert_response(make_event(), 503, "review_pipeline_not_implemented")
+        self.assert_response(make_event(), 503, "review_pipeline_not_configured")
+
+    def test_injected_pipeline_receives_only_validated_identity(self):
+        from unittest.mock import Mock
+        pipeline = Mock()
+        pipeline.run.return_value = "reviewed"
+        response = lambda_handler(make_event(), None, pipeline=pipeline)
+        self.assertEqual(response["statusCode"], 200)
+        self.assertEqual(json.loads(response["body"]), {"status": "reviewed"})
+        self.assertEqual(pipeline.run.call_args.args[0].repository, TEST_REPOSITORY)
+        pipeline.reset_mock()
+        event = make_event()
+        event["body"] += " "
+        self.assertEqual(lambda_handler(event, None, pipeline=pipeline)["statusCode"], 401)
+        pipeline.run.assert_not_called()
+
+    def test_pipeline_failure_is_sanitized(self):
+        from unittest.mock import Mock
+        pipeline = Mock()
+        pipeline.run.side_effect = RuntimeError(TEST_SECRET)
+        with self.assertLogs("auditor.handler") as captured:
+            response = lambda_handler(make_event(), None, pipeline=pipeline)
+        self.assertEqual(response["statusCode"], 502)
+        self.assertEqual(json.loads(response["body"]), {"status": "review_pipeline_failed"})
+        self.assertNotIn(TEST_SECRET, response["body"] + "".join(captured.output))
 
     def test_ping_and_irrelevant_event_are_acknowledged(self):
         for event_type in ("ping", "push"):

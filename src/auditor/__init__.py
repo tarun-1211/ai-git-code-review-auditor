@@ -1,1 +1,1 @@
-"""GitHub PR auditor: local foundation for the first implementation stage."""
+"""GitHub PR auditor with an offline-testable integration layer."""

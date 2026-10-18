@@ -31,7 +31,7 @@ class PullRequest:
 
     @property
     def review_id(self) -> str:
-        """A stable key for later DynamoDB conditional writes; not a lock yet."""
+        """Stable key used by the DynamoDB adapter's conditional claim."""
         return f"{self.repository.lower()}#{self.number}#{self.head_sha.lower()}"
 
 

@@ -1,178 +1,141 @@
 # AI GitHub Code Review & Security Auditor
 
-A Python and AWS coursework/portfolio project that will review GitHub Pull
-Request diffs with Amazon Bedrock and post a concise comment containing possible
-bugs, security issues, and suggested fixes.
+A Python project that reviews GitHub Pull Request diffs with Amazon Bedrock,
+stores structured findings in DynamoDB, and posts one readable PR comment.
 
-**Current status: stage 1, local foundation.** Webhook validation and the AI
-response contract work locally. GitHub API calls, Bedrock inference, DynamoDB,
-comment posting, and AWS infrastructure are not implemented yet. Nothing has
-been deployed or verified against live services.
+**Status: Stage 2A — local integration layer.** The complete code path runs with
+mocked GitHub, Bedrock, and DynamoDB dependencies. Nothing has been deployed,
+no live integrations have been verified, and no cloud account or credentials
+are needed for the tests.
 
-## Implementation stages
+Target repository: `yxshxsmv/Gateway-LLM-and-context-ernicher`. This is a
+configuration choice, not a hardcoded default. The application has not accessed
+or modified this repository.
 
-1. **Local foundation (implemented):** authenticated webhook handling, event
-   filtering, PR identifier validation, structured finding validation, and tests.
-2. **Review workflow (next):** bounded GitHub diff retrieval, configurable
-   Bedrock inference with boto3, DynamoDB duplicate prevention and persistence,
-   and one PR comment. Mock every external service in unit tests.
-3. **Deployment:** AWS SAM configuration, scoped IAM policies, and an approved
-   deployment followed by an explicitly approved live smoke test.
+## Local testing
 
-## Architecture
-
-Planned MVP:
-
-```mermaid
-flowchart LR
-    GH[GitHub PR webhook] --> API[API Gateway HTTP API]
-    API --> Intake[Lambda: verify and validate]
-    Intake -->|Asynchronous invocation| Worker[Lambda: review worker]
-    Worker -->|Fetch diff and post comment| REST[GitHub REST API]
-    Worker --> Bedrock[Amazon Bedrock]
-    Worker --> DB[Amazon DynamoDB]
-    Intake --> Logs[CloudWatch logs]
-    Worker --> Logs
-```
-
-The intake Lambda must respond quickly. GitHub expects a response within
-[10 seconds](https://docs.github.com/en/webhooks/using-webhooks/best-practices-for-using-webhooks).
-The planned second Lambda will do the slower review using
-[Lambda's asynchronous invocation](https://docs.aws.amazon.com/lambda/latest/dg/invocation-async.html),
-without adding a separate queue service. The intake will acknowledge a review
-only after AWS accepts that invocation. Both functions can use the same Python
-package with different handlers.
-
-Stage 1 implements the intake validation code, without the worker dispatch, plus
-a standalone findings parser. It has no server process or AWS SDK dependency.
-
-## Files
-
-```text
-.env.example                 Placeholder configuration; never real credentials
-.gitignore                   Excludes local secrets and generated files
-src/auditor/
-    __init__.py
-    handler.py               HTTP API v2 Lambda entry point and safe errors
-    webhook.py               HMAC verification and validated PR identity
-    findings.py              Strict AI JSON and location validation
-tests/
-    __init__.py
-    helpers.py               Fake webhook fixtures and signatures
-    test_handler.py
-    test_webhook.py
-    test_findings.py
-```
-
-## Prerequisites and local testing
-
-Python 3.12 or newer is sufficient for this stage. No packages, AWS account,
-GitHub token, Docker, or cloud resources are needed to run the tests.
-
-From the project directory:
+Use Python 3.12 or newer. From this directory:
 
 ```bash
 PYTHONPATH=src python3 -m unittest discover -s tests -v
 ```
 
-Tests use fake webhook data and model responses. Handler failures are injected
-with `unittest.mock`; there are no AWS or GitHub clients in this stage. Coverage
-includes GitHub's published HMAC test vector, modified payloads, base64/UTF-8,
-event filtering, invalid identities, size limits, malformed AI output, invented
-locations, configuration failures, and safe logging. Cloud service failure
-tests will accompany those clients in stage 2.
+Tests use only the Python standard library. boto3 is listed in
+`requirements.txt` for future real AWS clients, but it is not installed or
+imported by the mocked tests. No Docker, tokens, webhooks, internet connection,
+or paid services are required.
 
-## Configuration and credentials
-
-The example file documents variables; the application does **not** load `.env`
-files automatically. Unit tests set fake configuration themselves.
-
-| Variable | Purpose | Stage |
-| --- | --- | --- |
-| `GITHUB_WEBHOOK_SECRET` | Random shared secret used to verify GitHub HMAC signatures | Required by handler now |
-| `GITHUB_REPOSITORY` | Exact allowed target repository, `owner/name` | Required by handler now |
-| `AWS_REGION` | Chosen AWS region; supplied automatically inside Lambda | Planned |
-| `BEDROCK_MODEL_ID` | Available model or inference profile ID; no default assumption | Planned |
-| `GITHUB_TOKEN` | Token restricted to the repository being reviewed | Planned |
-| `DYNAMODB_TABLE_NAME` | Deployed review table | Planned |
-
-For a local handler experiment in Bash, enter the secret without displaying it
-or placing its value in shell history:
+To follow one complete signed webhook through the real adapter code with mock
+HTTP/SDK transports and a conditional in-memory table:
 
 ```bash
-read -r -s -p 'Webhook secret: ' GITHUB_WEBHOOK_SECRET
-printf '\n'
-export GITHUB_WEBHOOK_SECRET
-export GITHUB_REPOSITORY='OWNER/REPOSITORY'
+PYTHONPATH=src python3 -m unittest tests.test_pipeline.PipelineTests.test_full_signed_webhook_through_real_adapters_and_duplicate_claim_offline -v
 ```
 
-Replace the repository placeholder with your target. Use a password manager to
-generate and retain a random secret before configuring a real webhook. Never
-paste credentials into chat, commit them, or put them in example files.
+The integration tests block socket connection creation and inject every external
+dependency. They cover success, duplicate claims, malformed AI responses,
+incomplete diffs, stale commits, dependency failures, ambiguous comment delivery,
+and safe errors. The original webhook and findings tests remain in the suite.
 
-For deployment, use an AWS CLI profile configured on your machine, preferably
-with temporary credentials. Lambda will obtain AWS credentials from its IAM
-execution role. It does not need access keys in its environment.
+## How the pipeline works
 
-The initial MVP can use Lambda environment configuration for the webhook secret
-and GitHub token. Lambda
-[encrypts environment variables at rest](https://docs.aws.amazon.com/lambda/latest/dg/configuration-envvars.html);
-restrict who can read or edit function configuration. Enter secrets through
-Lambda's configuration console after the approved deployment, rather than
-embedding values in source files or SAM configuration. A secret store can be
-considered later if needed.
+```mermaid
+flowchart LR
+    Event[Signed webhook] --> Validate[Verify signature and validate PR]
+    Validate --> Claim[DynamoDB conditional claim]
+    Claim --> Diff[GitHub patches and commit checks]
+    Diff --> AI[Bedrock Converse]
+    AI --> Parse[Validate findings and locations]
+    Parse --> Save[DynamoDB structured review]
+    Save --> Check[Recheck PR commit and base]
+    Check --> Comment[One GitHub summary comment]
+    Comment --> Done[Save completion and comment ID]
+```
 
-For GitHub, plan a fine-grained token restricted to the target repository with
-**Pull requests: read and write**. That permission supports reading PR data and
-[creating a PR conversation comment](https://docs.github.com/en/rest/issues/comments#create-an-issue-comment).
-Do not request broad `repo` or administration permissions. The administrator
-configures the webhook manually; the application token does not create it.
+`ReviewPipeline` takes three dependencies: `github`, `reviewer`, and `store`.
+`build_pipeline(settings, github_opener=..., bedrock_client=...,
+dynamodb_table=...)` connects supplied transports to the real adapters. All
+three transports are required by this helper; a missing mock never silently
+creates a real client. The full integration test is a runnable composition example.
 
-## Webhook behavior in stage 1
+`lambda_handler(event, context, pipeline=pipeline)` runs the pipeline
+synchronously for local testing, after signature and event validation. It
+passes a validated `PullRequest` to the pipeline. Normal two-argument calls have
+no configured pipeline and return `503` for supported PR events. The handler
+does not read integration settings or construct clients automatically.
 
-The handler is `auditor.handler.lambda_handler`, with `src/` as the future Lambda
-code root. It expects API Gateway **HTTP API payload format 2.0**, using POST and
-GitHub's `application/json` webhook format. The future route is `POST /webhook`.
+This synchronous path is **not ready for a live webhook**. GitHub expects a
+response within [10 seconds](https://docs.github.com/en/webhooks/using-webhooks/best-practices-for-using-webhooks).
+A later stage will add a short intake Lambda and invoke a review worker using
+[Lambda's asynchronous invocation](https://docs.aws.amazon.com/lambda/latest/dg/invocation-async.html).
+No queue service or worker infrastructure has been added.
 
-It decodes base64 when necessary and checks HMAC-SHA256 against the **original
-bytes**, using constant-time comparison before parsing JSON. Reformatting JSON
-before verification would change those bytes and invalidate the signature.
-See [GitHub's signature documentation](https://docs.github.com/en/webhooks/using-webhooks/validating-webhook-deliveries).
+## Webhook behavior
 
-| Request | HTTP response |
+The handler expects API Gateway HTTP API payload format 2.0, POST, and GitHub's
+`application/json` format. It checks HMAC-SHA256 against the original bytes,
+including base64 decoding when necessary, before parsing JSON. It retains
+constant-time signature comparison, a 1,000,000-byte webhook limit, repository
+allowlisting, positive integer PR validation, matching base repository/PR
+numbers, and full head SHA validation. PRs from forks are supported.
+
+| Request | Response |
 | --- | --- |
-| Valid signed `ping`, other event, or irrelevant PR action | `200`, `ignored` |
-| Valid signed `pull_request`: `opened`, `reopened`, `synchronize` | `503`, `review_pipeline_not_implemented` |
-| Missing or incorrect signature | `401` |
-| Invalid body, identity fields, or header structure | `400` |
-| Supported PR event for a repository outside the configured target | `403` |
-| Body larger than 1,000,000 bytes | `413` |
-| Authenticated request with an unsupported content type | `415` |
-| Missing configuration or unexpected internal error | `500` |
+| Valid signed irrelevant event/action or ping | `200`, `ignored` |
+| Supported PR without an injected pipeline | `503`, `review_pipeline_not_configured` |
+| Completed injected pipeline | `200`, `reviewed`, `duplicate`, or `skipped` |
+| Injected pipeline failure | `502`, `review_pipeline_failed` |
+| Invalid signature / payload / repository / content type / oversized body | `401` / `400` / `403` / `415` / `413` |
+| Missing handler configuration or unexpected validation failure | `500` |
 
-The temporary `503` makes the incomplete workflow visible: no review is queued
-or performed. GitHub does not automatically redeliver failed webhooks; use
-[manual redelivery](https://docs.github.com/en/webhooks/testing-and-troubleshooting-webhooks/redelivering-webhooks)
-after the pipeline is available. Configure the real webhook after stage 2.
+Supported actions remain `opened`, `reopened`, and `synchronize`. GitHub does
+not automatically redeliver failed webhooks; a future operator must explicitly
+redeliver or reconcile them. The pipeline's duplicate policy still applies.
 
-Supported events must have matching repository/base-repository names, matching
-positive integer PR numbers, and a full 40-character hexadecimal head SHA. The
-configured repository acts as an allowlist. PRs from forks are allowed: the
-target/base repository must match; the contributor's head repository can differ.
-Webhook-provided URLs are never followed. Authentication does not make arbitrary
-payload fields safe to use as API paths.
+## GitHub diffs and input limits
 
-The validated identity supplies `repository#pr_number#head_sha` for future
-DynamoDB conditional writes. **It does not prevent duplicates yet.** Stage 2
-must atomically claim work and handle retries, stale commits, and the case where
-GitHub accepted a comment but the worker lost its response.
+The client uses the fixed `https://api.github.com` origin, validated PR numbers,
+and the configured repository. It never follows webhook URLs or HTTP redirects.
+Requests have a 10-second timeout and bounded response reads, with no automatic
+application retries. It uses GitHub REST API version `2026-03-10`.
 
-Logs contain fixed status messages and application-defined error codes. They do
-not include bodies, headers, secrets, tokens, or arbitrary exception messages.
+The [PR files endpoint](https://docs.github.com/en/rest/pulls/pulls#list-pull-requests-files)
+supplies per-file unified patches. The client retrieves PR metadata, reads one
+page with `per_page=100`, and checks that its file count equals the PR's complete
+`changed_files` count. The configured limit cannot exceed 100, so supported PRs
+fit on that page. Each hunk's old/new lengths and each file's additions/deletions
+are verified, then totals are compared with PR metadata.
 
-## AI response contract
+Missing/binary patches, rename-only changes without a patch, incomplete patches,
+empty diffs, and oversized input cause the **whole PR review to be skipped**.
+No truncated diff is sent to the model. Skips are stored with a fixed reason
+code and do not receive a GitHub comment. This text-only MVP skips changes
+that it cannot represent completely.
 
-`parse_review(text, changed_lines=...)` accepts a single JSON object:
+Head and base SHAs are checked around retrieval and again before commenting.
+Closed PRs and stale webhook commits are skipped. A small race remains between
+the final check and comment creation; comments identify the reviewed head
+commit. Base changes with the same head do not create a new review key.
+
+## Bedrock and structured findings
+
+`BedrockReviewer` uses boto3's
+[Converse API](https://docs.aws.amazon.com/bedrock/latest/userguide/conversation-inference.html).
+Choose a model or inference profile supporting Converse, text messages, system
+prompts, and the output token limit in your region. No model ID or region is
+assumed. Models requiring another inference API are outside this adapter's scope.
+Availability and access must be confirmed before approved live inference.
+
+The system prompt treats code, comments, and filenames as untrusted data,
+instructs the model to express uncertainty, and requests one JSON object. The
+input byte limit includes both the system prompt and serialized user text.
+`maxTokens` bounds generation. Byte limits are not precise input token counts
+or dollar spending caps. Truncation, content filtering, tool output, and
+unexpected response formats are rejected. AWS SDK retries are disabled for
+these clients to avoid hidden repeated calls.
+
+The existing `parse_review()` validates output before it is saved as a review
+or posted:
 
 ```json
 {
@@ -191,68 +154,130 @@ not include bodies, headers, secrets, tokens, or arbitrary exception messages.
 }
 ```
 
-Severity is `low`, `medium`, `high`, or `critical`. Confidence is `likely` or
-`speculative`; neither means a finding is proven. Unknown file/line locations
-must be JSON `null`. A line requires a file and must belong to the caller's
-verified new-file diff line map, for example `{"src/example.py": {10, 11, 12}}`.
-Files with no available new-file lines can still be referenced with a null line.
+Severity is `low`, `medium`, `high`, or `critical`; confidence is `likely` or
+`speculative`. Unknown locations must be `null`. Files must be present in the
+diff and lines must belong to the verified new-file patch lines, including
+visible context. Deleted files may have a null line. Limits remain 64,000
+response bytes, 20 findings, and 2,000 characters per text field. Malformed JSON,
+extra/missing fields, duplicate keys, and invalid locations are rejected.
+Structural/location validation cannot prove a finding correct.
 
-The parser rejects extra/missing fields, duplicate JSON keys, code fences,
-invalid types, unknown files, invalid lines, and oversized results. Limits are
-64,000 UTF-8 bytes per response, 20 findings, and 2,000 characters per text field.
-An empty findings list is allowed. This verifies shape and location membership;
-it cannot establish that the diagnosis or suggested fix is correct.
+The single comment contains the summary and every finding's severity,
+confidence, location, reasoning, and suggested fix. Untrusted text is escaped
+and placed in preformatted blocks so it does not become HTML or Markdown
+images/links. Oversized rendered comments fail explicitly. Submitted code is
+never executed; source modifications and PR merges are outside scope.
 
-Stage 2 will build the line map from an API-fetched diff, limit both diff bytes
-and model input/output, and explicitly skip changes that cannot be reviewed
-completely. These response limits alone do **not** limit inference costs.
-The Bedrock prompt must treat code and descriptions as untrusted data and tell
-the model to express uncertainty. Submitted code will never be executed.
+## DynamoDB records and duplicates
 
-## Deployment approach and IAM (planned)
+The eventual table needs one **String partition key named `review_id`**, with
+no sort key. The adapter does not create tables. A conditional
+[PutItem](https://docs.aws.amazon.com/boto3/latest/reference/services/dynamodb/table/put_item.html)
+claims `repository#pr_number#head_sha` before code retrieval or inference.
+Only one claimant proceeds. Records include repository/PR/head metadata,
+configured model ID, timestamps, structured findings, base SHA, and the comment
+ID after successful completion.
 
-Use **AWS SAM**, AWS's supported template/CLI tooling for Lambda applications.
-One template will describe the HTTP API, two functions, DynamoDB, log groups,
-and narrowly scoped execution roles. Keeping these resources together makes
-the coursework architecture reproducible. No deployment template is included
-in this first stage because the review workflow and model/region choice are
-still pending.
+```text
+processing → review_ready → posting → completed
+```
 
-SAM deployment uploads Lambda ZIP artifacts to an S3 bucket. This requires an
-explicitly agreed deployment-packaging exception to the project's S3 boundary;
-no bucket or other cloud resource has been created. The application itself
-will store reviews in DynamoDB. SAM CLI is not currently installed here.
+Conditional updates enforce expected states. Failures record fixed codes as
+`failed`; unsupported/stale input becomes `skipped`. After posting starts,
+errors become `comment_uncertain`: GitHub may have accepted a comment before
+its response or the completion write was lost.
 
-Once the workflow, region, and packaging decision are settled, the deployment
-sequence will be a local `sam build`, review of the template/change set and
-costs, then an explicitly approved `sam deploy --guided`. These are future
-steps, not runnable deployment instructions for the current stage. AWS SAM
-[documents the guided deployment process](https://docs.aws.amazon.com/serverless-application-model/latest/developerguide/using-sam-cli-deploy.html).
+**Any existing review key blocks another attempt**, including failed, skipped,
+in-progress, and uncertain records. This conservative MVP policy avoids repeated
+inference and blind comment retries, but has no automatic recovery or claim
+expiration. A crash or failed status write can leave an in-progress record.
+Before manually allowing a retry, inspect the record and PR comments and
+reconcile any existing comment. This is not atomic exactly-once delivery across
+GitHub and DynamoDB.
 
-The intake role will need only access to its own logs and permission to invoke
-the worker. The worker role will need access to its own logs, specific DynamoDB
-item operations on the review table, and inference access to the selected
-Bedrock resource(s). Exact Bedrock ARNs depend on the chosen model/profile.
-GitHub access uses its repository-scoped token. No administrator policy is
-needed by either function.
+## Configuration and credentials
 
-## Costs and next setup
+`.env.example` has placeholders and non-secret limit defaults. Files are not
+loaded automatically. Tests supply fake configuration themselves.
 
-Local tests incur no AWS or model charges. The deployed application would bill
-for HTTP API requests, Lambda invocations/duration (including asynchronous
-processing), Bedrock input/output tokens, DynamoDB requests/storage, and
-CloudWatch logs. SAM's artifact bucket would also incur storage/request costs.
-Free tier eligibility varies; do not assume the project will be free.
+| Variable | Purpose | Default |
+| --- | --- | --- |
+| `GITHUB_WEBHOOK_SECRET` | Shared HMAC secret, read by handler | Required |
+| `GITHUB_REPOSITORY` | Exact allowed target, read by handler and Settings | Required |
+| `GITHUB_TOKEN` | Fine-grained token restricted to that repository | Required by Settings |
+| `AWS_REGION` | Bedrock/DynamoDB region; automatic inside Lambda | Required by Settings |
+| `BEDROCK_MODEL_ID` | Converse-compatible model/profile ID | Required by Settings |
+| `DYNAMODB_TABLE_NAME` | Existing table with `review_id` partition key | Required by Settings |
+| `MAX_DIFF_BYTES` | Complete serialized patches, UTF-8 bytes | 32000 |
+| `MAX_FILES` | Whole PR file count, at most 100 | 50 |
+| `MAX_MODEL_INPUT_BYTES` | System prompt plus serialized user text | 48000 |
+| `MAX_OUTPUT_TOKENS` | Generated tokens, at most 4096 | 2000 |
 
-For an eventual estimate, multiply reviews per month by expected model input
-and output tokens at the selected model's
-[current regional rates](https://aws.amazon.com/bedrock/pricing/), then add the
-other services. A numeric estimate needs a region, model, and expected PR
-volume. Small byte/token limits, low concurrency, duplicate prevention, and
-short log retention will keep the MVP bounded. Budget alerts notify; they do
-not impose a hard spending cap.
+For the stated target, the non-secret repository setting will be:
 
-Next, identify your AWS account/region, an available Bedrock model or inference
-profile, and a GitHub target repository. No credentials are needed in chat.
-No cloud resources, paid inference, deployment, or live comment posting will
-be performed without explaining the action and obtaining your approval.
+```bash
+export GITHUB_REPOSITORY='yxshxsmv/Gateway-LLM-and-context-ernicher'
+```
+
+No secret configuration is needed now. For later authorized setup, keep tokens
+and random webhook secrets in a password manager, local environment, or Lambda
+configuration. Use a hidden prompt instead of putting secrets in shell history:
+
+```bash
+read -r -s -p 'GitHub token: ' GITHUB_TOKEN
+printf '\n'
+export GITHUB_TOKEN
+```
+
+Never paste credentials into chat or commit them. Settings representations omit
+the token. Errors and logs exclude payloads, headers, credentials, model output,
+and dependency exception messages. Do not enable SDK/HTTP debug logging with
+credentials present. Failure records contain only application-defined error codes.
+
+A future fine-grained GitHub token needs **Pull requests: read and write** on
+the target for PR reads and
+[conversation comments](https://docs.github.com/en/rest/issues/comments#create-an-issue-comment).
+The application needs no repository administration or webhook installation
+permission. Real AWS clients use boto3's credential chain; Lambda will use its
+execution role rather than embedded AWS keys.
+
+## Files
+
+| File | Responsibility |
+| --- | --- |
+| `src/auditor/handler.py` | HTTP API v2 intake and injected pipeline |
+| `src/auditor/webhook.py` | Signatures, filtering, allowlist, PR identity |
+| `src/auditor/findings.py` | Existing strict findings validator |
+| `src/auditor/config.py` | Explicit settings and bounded limits |
+| `src/auditor/github.py` | GitHub HTTP client and commit checks |
+| `src/auditor/diff.py` | Patch completeness and line mapping |
+| `src/auditor/bedrock.py` | Configurable boto3 Converse adapter |
+| `src/auditor/storage.py` | DynamoDB claims and state updates |
+| `src/auditor/pipeline.py` | Orchestration, formatting, composition |
+| `src/auditor/errors.py` | Credential-free integration/skip errors |
+| `tests/` | Offline unit and integration tests |
+| `requirements.txt` | boto3 for future real AWS clients |
+
+## Deployment, permissions, and costs
+
+Deployment remains a future stage. The intended approach is AWS SAM with an
+HTTP API, intake/review Lambdas, DynamoDB, logs, and scoped IAM roles. SAM ZIP
+packaging normally uses S3, so that exception to the S3 boundary must be agreed
+before preparing deployment. No template, cloud resource, webhook, or real
+client wiring has been deployed.
+
+The future review role needs only `dynamodb:PutItem` and `dynamodb:UpdateItem`
+on its table, selected Bedrock inference resources, and its own logs. The intake
+will need worker invocation and its own logs. Exact Bedrock resources depend
+on the model/profile. No IAM policies or administrator grants were introduced.
+
+Local tests incur no AWS charges. A deployed service can incur API Gateway,
+Lambda, Bedrock token, DynamoDB, CloudWatch, and deployment artifact costs.
+Estimate after choosing a region, model, and PR volume using
+[Bedrock's current rates](https://aws.amazon.com/bedrock/pricing/). Free tier
+eligibility varies; size limits and alerts do not guarantee zero charges.
+
+Next decisions: choose a region and compatible Bedrock model/profile, then plan
+the asynchronous worker wiring, recovery procedure, IAM, and deployment. Real
+tokens, webhooks, table creation, live comments, and inference can wait until
+that setup is explicitly approved.

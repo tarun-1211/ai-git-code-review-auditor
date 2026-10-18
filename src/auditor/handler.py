@@ -1,4 +1,4 @@
-"""API Gateway HTTP API entry point. Stage 1 validates; it cannot review yet."""
+"""HTTP API entry point; pipeline injection enables offline integration tests."""
 
 import json
 import logging
@@ -19,7 +19,7 @@ def _response(status_code: int, status: str) -> dict:
     }
 
 
-def lambda_handler(event: dict, context: object) -> dict:
+def lambda_handler(event: dict, context: object, *, pipeline=None) -> dict:
     if not isinstance(event, dict) or event.get("version") != "2.0":
         return _response(400, "expected_http_api_v2_event")
     request_context = event.get("requestContext")
@@ -48,7 +48,15 @@ def lambda_handler(event: dict, context: object) -> dict:
         logger.info("Authenticated webhook ignored")
         return _response(200, "ignored")
 
-    # Replace this with an asynchronous worker invocation in stage 2. A success
-    # response here would acknowledge a review that has never been scheduled.
-    logger.warning("PR validated; review pipeline is not implemented")
-    return _response(503, "review_pipeline_not_implemented")
+    if pipeline is None:
+        logger.warning("PR validated; no review pipeline is configured")
+        return _response(503, "review_pipeline_not_configured")
+    try:
+        status = pipeline.run(pr)
+        if status not in ("reviewed", "duplicate", "skipped"):
+            raise ValueError
+        logger.info("Review pipeline finished: %s", status)
+        return _response(200, status)
+    except Exception:
+        logger.error("Review pipeline failed")
+        return _response(502, "review_pipeline_failed")
