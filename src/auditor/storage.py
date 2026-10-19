@@ -18,7 +18,7 @@ class DynamoDBStore:
                                    config=Config(connect_timeout=5, read_timeout=10,
                                                  retries={"total_max_attempts": 1})).Table(settings.table_name)
         self._table = table
-        self.model_id = settings.model_id
+        self.model_id = settings.effective_model_id
 
     def claim(self, pr):
         try:

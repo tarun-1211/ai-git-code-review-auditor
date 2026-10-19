@@ -5,6 +5,16 @@ class IntegrationError(RuntimeError):
     pass
 
 
+class ProviderUnavailable(IntegrationError):
+    """Only these fixed availability errors are eligible for explicit fallback."""
+
+    CODES = frozenset({"groq_timeout", "groq_rate_limited", "groq_unavailable",
+                       "groq_http_error", "live_groq_disabled"})
+
+    def __init__(self, code):
+        super().__init__(code if code in self.CODES else "groq_unavailable")
+
+
 class SkipReview(ValueError):
     """The entire PR must be skipped rather than reviewing partial input."""
 

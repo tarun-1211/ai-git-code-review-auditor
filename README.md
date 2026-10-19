@@ -1,12 +1,18 @@
 # AI GitHub Code Review & Security Auditor
 
-A Python project that reviews GitHub Pull Request diffs with Amazon Bedrock,
-stores structured findings in DynamoDB, and posts one readable PR comment.
+A Python project that reviews GitHub Pull Request diffs using a configurable AI
+provider or limited deterministic security rules, stores findings through a
+DynamoDB adapter, and prepares one readable PR comment through a GitHub adapter.
 
 **Status: Stage 2A — local integration layer.** The complete code path runs with
-mocked GitHub, Bedrock, and DynamoDB dependencies. Nothing has been deployed,
+mocked GitHub, AI-provider, and DynamoDB dependencies. Nothing has been deployed,
 no live integrations have been verified, and no cloud account or credentials
 are needed for the tests.
+
+The intended AI path is now Groq-compatible chat completions. **Bedrock is not
+part of the live path.** Providers and live HTTP access default to disabled;
+development and tests use local rules or injected mocks. This task creates no
+infrastructure and does not upgrade any account or enable paid plans.
 
 Target repository: `yxshxsmv/Gateway-LLM-and-context-ernicher`. This is a
 configuration choice, not a hardcoded default. The application has not accessed
@@ -32,6 +38,13 @@ HTTP/SDK transports and a conditional in-memory table:
 PYTHONPATH=src python3 -m unittest tests.test_pipeline.PipelineTests.test_full_signed_webhook_through_real_adapters_and_duplicate_claim_offline -v
 ```
 
+That original test remains as a mocked Bedrock compatibility check. For the new
+Groq and rules paths, still completely offline:
+
+```bash
+PYTHONPATH=src python3 -m unittest tests.test_providers tests.test_rules tests.test_provider_pipeline -v
+```
+
 The integration tests block socket connection creation and inject every external
 dependency. They cover success, duplicate claims, malformed AI responses,
 incomplete diffs, stale commits, dependency failures, ambiguous comment delivery,
@@ -44,7 +57,7 @@ flowchart LR
     Event[Signed webhook] --> Validate[Verify signature and validate PR]
     Validate --> Claim[DynamoDB conditional claim]
     Claim --> Diff[GitHub patches and commit checks]
-    Diff --> AI[Bedrock Converse]
+    Diff --> AI[Selected reviewer: Groq or local rules]
     AI --> Parse[Validate findings and locations]
     Parse --> Save[DynamoDB structured review]
     Save --> Check[Recheck PR commit and base]
@@ -53,10 +66,22 @@ flowchart LR
 ```
 
 `ReviewPipeline` takes three dependencies: `github`, `reviewer`, and `store`.
-`build_pipeline(settings, github_opener=..., bedrock_client=...,
-dynamodb_table=...)` connects supplied transports to the real adapters. All
-three transports are required by this helper; a missing mock never silently
-creates a real client. The full integration test is a runnable composition example.
+The `Reviewer` protocol defines `analyze(diff)`. Legacy JSON string responses
+still work; new reviewers return `ReviewResult` containing JSON and trusted
+provenance. The strict findings schema itself has not changed.
+
+`build_pipeline(settings, github_opener=..., provider_opener=...,
+dynamodb_table=...)` connects explicit GitHub/DynamoDB test transports and uses
+`REVIEW_PROVIDER` to select a reviewer. For `groq`, inject the mock HTTP opener;
+for `rules`, no provider transport or key is needed. Missing GitHub/table
+dependencies fail closed. An explicit `reviewer=` can also be injected directly.
+See `tests/test_provider_pipeline.py` for complete mocked examples.
+
+The old `bedrock_client=` argument remains supported for existing tests and
+callers; it explicitly selects the archived adapter when the provider is
+otherwise disabled. No factory ever constructs a Bedrock client. The legacy
+`bedrock_failed` failure label is retained for untyped legacy reviewers; new
+providers use `provider_failed` and rules use `rules_failed`.
 
 `lambda_handler(event, context, pipeline=pipeline)` runs the pipeline
 synchronously for local testing, after signature and event validation. It
@@ -83,7 +108,7 @@ numbers, and full head SHA validation. PRs from forks are supported.
 | --- | --- |
 | Valid signed irrelevant event/action or ping | `200`, `ignored` |
 | Supported PR without an injected pipeline | `503`, `review_pipeline_not_configured` |
-| Completed injected pipeline | `200`, `reviewed`, `duplicate`, or `skipped` |
+| Completed injected pipeline | `200`, `reviewed`, `reviewed_rules`, `duplicate`, or `skipped` |
 | Injected pipeline failure | `502`, `review_pipeline_failed` |
 | Invalid signature / payload / repository / content type / oversized body | `401` / `400` / `403` / `415` / `413` |
 | Missing handler configuration or unexpected validation failure | `500` |
@@ -117,56 +142,100 @@ Closed PRs and stale webhook commits are skipped. A small race remains between
 the final check and comment creation; comments identify the reviewed head
 commit. Base changes with the same head do not create a new review key.
 
-## Bedrock and structured findings
+## Provider selection, fallback, and structured findings
 
-`BedrockReviewer` uses boto3's
-[Converse API](https://docs.aws.amazon.com/bedrock/latest/userguide/conversation-inference.html).
-`Settings.from_env()` now defaults `BEDROCK_MODEL_ID` to
-**`global.amazon.nova-2-lite-v1:0`**, the Amazon Nova 2 Lite Global inference
-profile listed in [AWS's Nova 2 documentation](https://docs.aws.amazon.com/nova/latest/nova2-userguide/core-inference.html).
-An explicit `BEDROCK_MODEL_ID` still overrides it; a blank value fails validation.
-Direct `Settings(...)` construction retains its explicit model argument for
-compatibility. `AWS_REGION` remains required for the AWS client; Global inference
-does not remove the need to choose a supported source region and confirm access.
-An alternative model must support Converse, text/system prompts, and the output
-token limit. Models requiring another inference API are outside this adapter.
+`REVIEW_PROVIDER` is explicit: `disabled` (default), `rules`, or `groq`.
+The archived `bedrock` selector requires an explicitly injected SDK client and
+is retained only for compatibility. Unknown selectors fail validation; there
+is no automatic selection based on available credentials.
 
-Requests use the **Standard inference tier** by omitting the optional service
-tier parameter, as described in [AWS's tier documentation](https://docs.aws.amazon.com/bedrock/latest/userguide/service-tiers-inference.html).
-There is no Priority tier or performance optimization setting. Nova extended
-thinking remains disabled by omission, its documented
-[default](https://docs.aws.amazon.com/nova/latest/nova2-userguide/using-converse-api.html).
-The existing text-only findings parser and pipeline remain compatible.
+### Groq-compatible provider
 
-**Live inference stays disabled.** `ENABLE_LIVE_BEDROCK=false` is the default.
-Without an injected client, the adapter raises `live_bedrock_disabled` before
-importing boto3 or discovering credentials. Tests inject mocks and do not need
-the opt-in. Injected clients are caller-controlled and bypass this construction
-guard, so only test doubles should be supplied during local development.
-The mocked SDK-construction test also verifies the opt-in path without AWS.
+`GroqReviewer` uses Python's standard-library HTTPS client, not an extra SDK.
+The configurable endpoint defaults to
+`https://api.groq.com/openai/v1/chat/completions`. Endpoints must use HTTPS,
+contain no embedded credentials, query or fragment, and end in
+`/chat/completions`. Redirects are refused so credentials cannot be forwarded
+to another origin. The endpoint is trusted operator configuration, never a PR
+field. Models and API keys have no usable default and are required when Groq
+is selected. Keys are excluded from settings representations.
 
-A later live call requires explicit approval, confirmation of source region,
-profile access and IAM, then an intentional `ENABLE_LIVE_BEDROCK=true` setting
-when constructing an adapter-owned client. Setting the variable alone does not
-invoke inference or connect the inactive webhook handler. Real client wiring
-and the asynchronous deployment path still need a later stage. No live call has
-been enabled or verified here.
+The request uses system/user messages, `max_completion_tokens`, and
+`stream=false`. `MAX_MODEL_INPUT_BYTES` bounds the entire serialized request,
+including instructions, JSON overhead, and diff text. `MAX_DIFF_BYTES` remains
+16,000 by default; total request input is 24,000 bytes, and output is capped at
+1,024 tokens. These limits are configurable and are not a spending cap.
+HTTP response reads are bounded by `GROQ_MAX_RESPONSE_BYTES` (96,000); findings
+JSON keeps its existing 64,000-byte limit. The timeout defaults to 15 seconds.
 
-The system prompt treats code, comments, and filenames as untrusted data,
-instructs the model to express uncertainty, and requests one JSON object. The
-input byte limit includes both the system prompt and serialized user text.
-`maxTokens` bounds generation. Byte limits are not precise input token counts
-or dollar spending caps. Truncation, content filtering, tool output, and
-unexpected response formats are rejected. AWS SDK retries are disabled for
-these clients to avoid hidden repeated calls.
+Only one assistant choice with `finish_reason=stop`, text content, and valid
+findings is accepted. Duplicate/nonstandard JSON, bad locations, tool calls,
+refusals, incomplete HTTP bodies, token truncation, malformed output, and
+oversized results fail rather than posting partial reviews. There are no
+application retries, including on HTTP 429. Exceptions, response bodies,
+authorization headers, API keys, and source text are never included in logs.
 
-Conservative defaults are 16,000 diff bytes, 24,000 combined prompt bytes, and
-1,024 output tokens, all configurable through the existing size/token variables.
-Oversized inputs skip the entire review before inference. The smaller output
-budget may truncate a review with many findings; truncated output is rejected
-and is never saved or posted as a successful review. The 60-second SDK read
-timeout remains in place; a timeout is an error, not proof that inference did
-not run or incur charges. No automatic inference retry is made.
+`ENABLE_LIVE_GROQ=false` blocks creation of the provider-owned HTTP transport
+before a request is made. A missing mock therefore does not cause a live call.
+Explicit injected transports are caller-controlled test dependencies; they
+must remain mocks during development. Tests additionally block network socket
+connections. A live transport must not be supplied under the current task's
+constraints. The handler remains inactive without an explicitly injected pipeline.
+
+**Verify Groq free-tier model availability, quotas, and billing behavior manually
+before considering any later live integration.** No model is assumed available
+or free, and no model ID is guessed. No Groq API or account access was used to
+check availability. Do not enable live inference, add payment methods, upgrade
+plans, or enable paid usage as part of this development task. A timeout is not
+proof that a remote request did not run; the code does not retry it.
+
+### Deterministic rules and explicit fallback
+
+`REVIEW_PROVIDER=rules` runs only local checks. `ENABLE_RULE_FALLBACK=true`
+allows Groq availability failures (timeouts, connection failures, rate limits,
+authentication/server errors, or disabled live access) to run the local rules.
+It defaults to false. Invalid/truncated AI output, client request errors,
+oversized input, and diff validation failures **never** trigger fallback.
+A failed AI response is discarded completely; rule findings are generated
+independently from the full validated diff. No partial AI findings are merged.
+
+The rules cover added, single-line Python statements using:
+
+- `pickle.load` / `pickle.loads`;
+- `yaml.load` without a recognized safe Loader, or `yaml.unsafe_load`;
+- supported `subprocess` calls with literal `shell=True`.
+
+The checker parses ASTs without executing code. It ignores comments, plain
+string examples, removed/context lines, and non-Python files. Multiline
+fragments, imports/aliases, variable flow, custom loader semantics, and other
+security categories are not analyzed. Findings are speculative risk patterns,
+not proof of an exploitable vulnerability. More than 20 rule findings causes
+an explicit failure instead of a partial result.
+
+Rule findings carry stable IDs such as `[Rule PY-PICKLE]` in their descriptions.
+Their comments say **Rule-based security checks** and **AI analysis was not
+performed**. Fallback comments also say the AI provider was unavailable. The
+handler returns `reviewed_rules`, not an AI review result. Storage records
+`review_source`, `review_provider`, `review_model_id`, and `ai_status` separately
+from the existing findings JSON. Fallback adds a fixed `fallback_reason` code;
+no external error text is stored. A no-match rule review makes no claim of
+security or successful AI analysis.
+
+### Archived Bedrock compatibility
+
+The Bedrock adapter and all Nova tests remain isolated and working with mocks.
+`ENABLE_LIVE_BEDROCK` stays false. Its old Nova model default remains only in
+legacy settings for backward compatibility; Groq uses `GROQ_MODEL_ID` instead.
+The provider factory requires an injected Bedrock client even if that old
+opt-in is true. Bedrock is not part of the intended live path. No inference
+permissions, plan upgrades, or real SDK clients are added by this pivot.
+
+### Shared findings validation
+
+All reviewers use the existing findings validator. The common system prompt
+treats code, comments, and filenames as untrusted data, instructs the AI to
+express uncertainty, and requests exactly one JSON object. No submitted code
+is executed. Input and output limits remain in place for every selected path.
 
 The existing `parse_review()` validates output before it is saved as a review
 or posted:
@@ -212,6 +281,11 @@ Only one claimant proceeds. Records include repository/PR/head metadata,
 configured model ID, timestamps, structured findings, base SHA, and the comment
 ID after successful completion.
 
+The claim records the requested model (or rules version); new completed reviews
+also record the actual reviewer in `review_model_id`. A fallback therefore keeps
+the requested Groq model in `model_id` and identifies the rules version and
+unavailable AI status in the review metadata. Legacy record fields still work.
+
 ```text
 processing → review_ready → posting → completed
 ```
@@ -239,13 +313,21 @@ loaded automatically. Tests supply fake configuration themselves.
 | `GITHUB_WEBHOOK_SECRET` | Shared HMAC secret, read by handler | Required |
 | `GITHUB_REPOSITORY` | Exact allowed target, read by handler and Settings | Required |
 | `GITHUB_TOKEN` | Fine-grained token restricted to that repository | Required by Settings |
-| `AWS_REGION` | Bedrock/DynamoDB region; automatic inside Lambda | Required by Settings |
-| `BEDROCK_MODEL_ID` | Converse-compatible model/profile ID | `global.amazon.nova-2-lite-v1:0` via environment loader |
-| `ENABLE_LIVE_BEDROCK` | Allow adapter-owned real Bedrock client construction | `false` |
+| `REVIEW_PROVIDER` | Explicit `disabled`, `rules`, `groq`; archived `bedrock` needs injected SDK | `disabled` |
+| `GROQ_MODEL_ID` | Manually verified compatible model ID | Required for Groq; no default |
+| `GROQ_API_KEY` | Provider key, excluded from representations/logs | Required for Groq |
+| `GROQ_ENDPOINT` | Trusted HTTPS chat-completions URL | `https://api.groq.com/openai/v1/chat/completions` |
+| `GROQ_TIMEOUT_SECONDS` | HTTP timeout, 1–60 seconds | 15 |
+| `GROQ_MAX_RESPONSE_BYTES` | Bounded HTTP response body | 96000 |
+| `ENABLE_LIVE_GROQ` | Allow constructing a real HTTP transport | `false` |
+| `ENABLE_RULE_FALLBACK` | Rules only on provider unavailability | `false` |
+| `AWS_REGION` | Retained DynamoDB adapter region | Required by existing Settings |
+| `BEDROCK_MODEL_ID` | Archived compatibility setting only | Original Nova default retained |
+| `ENABLE_LIVE_BEDROCK` | Archived direct-constructor opt-in; keep disabled | `false` |
 | `DYNAMODB_TABLE_NAME` | Existing table with `review_id` partition key | Required by Settings |
 | `MAX_DIFF_BYTES` | Complete serialized patches, UTF-8 bytes | 16000 |
 | `MAX_FILES` | Whole PR file count, at most 100 | 50 |
-| `MAX_MODEL_INPUT_BYTES` | System prompt plus serialized user text | 24000 |
+| `MAX_MODEL_INPUT_BYTES` | Complete serialized Groq request, including instructions | 24000 |
 | `MAX_OUTPUT_TOKENS` | Generated tokens, at most 4096 | 1024 |
 
 For the stated target, the non-secret repository setting will be:
@@ -263,6 +345,13 @@ read -r -s -p 'GitHub token: ' GITHUB_TOKEN
 printf '\n'
 export GITHUB_TOKEN
 ```
+
+Existing Settings still require backend repository/token, region, and table
+configuration. All local tests supply fake values and injected transports;
+these fields do not require creating an AWS table or providing real credentials.
+For local deterministic work, select `REVIEW_PROVIDER=rules` and leave both live
+flags false. The offline tests are the supported local entry point; setting
+configuration variables does not itself run a pipeline or post a comment.
 
 Never paste credentials into chat or commit them. Settings representations omit
 the token. Errors and logs exclude payloads, headers, credentials, model output,
@@ -286,7 +375,10 @@ execution role rather than embedded AWS keys.
 | `src/auditor/config.py` | Explicit settings and bounded limits |
 | `src/auditor/github.py` | GitHub HTTP client and commit checks |
 | `src/auditor/diff.py` | Patch completeness and line mapping |
-| `src/auditor/bedrock.py` | Configurable boto3 Converse adapter |
+| `src/auditor/reviewers.py` | Reviewer protocol, provenance, explicit selection/fallback |
+| `src/auditor/groq.py` | Bounded standard-library chat-completions adapter |
+| `src/auditor/rules.py` | Limited deterministic Python security patterns |
+| `src/auditor/bedrock.py` | Archived, isolated boto3 Converse compatibility |
 | `src/auditor/storage.py` | DynamoDB claims and state updates |
 | `src/auditor/pipeline.py` | Orchestration, formatting, composition |
 | `src/auditor/errors.py` | Credential-free integration/skip errors |
@@ -295,24 +387,20 @@ execution role rather than embedded AWS keys.
 
 ## Deployment, permissions, and costs
 
-Deployment remains a future stage. The intended approach is AWS SAM with an
-HTTP API, intake/review Lambdas, DynamoDB, logs, and scoped IAM roles. SAM ZIP
-packaging normally uses S3, so that exception to the S3 boundary must be agreed
-before preparing deployment. No template, cloud resource, webhook, or real
-client wiring has been deployed.
+No deployment or infrastructure changes are included or authorized here. The
+existing AWS adapters and conceptual architecture are retained without creating
+resources. No IAM policies, permissions, dependency upgrades, account plan
+changes, or billing changes were made. Bedrock inference permissions are not
+needed by the intended Groq path.
 
-The future review role needs only `dynamodb:PutItem` and `dynamodb:UpdateItem`
-on its table, selected Bedrock inference resources, and its own logs. The intake
-will need worker invocation and its own logs. Exact Bedrock resources depend
-on the model/profile. No IAM policies or administrator grants were introduced.
+Local tests use mocks and make no service requests. Future real Groq, GitHub,
+or AWS usage must be evaluated separately; provider names, quotas, byte limits,
+and token limits do not guarantee zero charges. The current constraints forbid
+out-of-pocket charges and account/paid-plan upgrades. No live access is enabled
+as part of this pivot.
 
-Local tests incur no AWS charges. A deployed service can incur API Gateway,
-Lambda, Bedrock token, DynamoDB, CloudWatch, and deployment artifact costs.
-Estimate after choosing a region, model, and PR volume using
-[Bedrock's current rates](https://aws.amazon.com/bedrock/pricing/). Free tier
-eligibility varies; size limits and alerts do not guarantee zero charges.
-
-Next decisions: choose a source region and confirm Nova 2 Lite Global profile
-access, then plan asynchronous worker wiring, recovery, IAM, and deployment. Real
-tokens, webhooks, table creation, live comments, and inference can wait until
-that setup is explicitly approved.
+Next recommended step: run the new rule and provider fixtures locally and inspect
+their comments and provenance. Separately, manually check the available Groq
+free-tier models, quotas, and billing controls without enabling live inference.
+No credentials are needed in chat. Any future live integration needs a separate,
+explicit decision consistent with the zero-charge constraint.

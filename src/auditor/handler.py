@@ -53,7 +53,7 @@ def lambda_handler(event: dict, context: object, *, pipeline=None) -> dict:
         return _response(503, "review_pipeline_not_configured")
     try:
         status = pipeline.run(pr)
-        if status not in ("reviewed", "duplicate", "skipped"):
+        if status not in ("reviewed", "reviewed_rules", "duplicate", "skipped"):
             raise ValueError
         logger.info("Review pipeline finished: %s", status)
         return _response(200, status)
