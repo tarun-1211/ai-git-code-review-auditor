@@ -24,6 +24,10 @@ class BedrockReviewer:
         self.max_input_bytes = settings.max_input_bytes
         self.max_output_tokens = settings.max_output_tokens
         if client is None:
+            # Fail before SDK construction or credential discovery. Injected
+            # clients are caller-controlled test doubles in the local pipeline.
+            if not settings.enable_live_bedrock:
+                raise IntegrationError("live_bedrock_disabled")
             import boto3
             from botocore.config import Config
             client = boto3.client("bedrock-runtime", region_name=settings.region,
@@ -32,10 +36,13 @@ class BedrockReviewer:
         self._client = client
 
     def analyze(self, diff):
-        user_text = json.dumps({"untrusted_pr_diff": diff.text}, ensure_ascii=False)
-        if len((SYSTEM_PROMPT + user_text).encode("utf-8")) > self.max_input_bytes:
-            raise SkipReview("model_input_too_large")
         try:
+            user_text = json.dumps({"untrusted_pr_diff": diff.text}, ensure_ascii=False)
+            if len((SYSTEM_PROMPT + user_text).encode("utf-8")) > self.max_input_bytes:
+                raise SkipReview("model_input_too_large")
+            # Omit serviceTier: Bedrock routes to Standard by default. Do not
+            # request Priority or performance optimizations. Nova reasoning is
+            # also left disabled (the model default), preserving the token cap.
             result = self._client.converse(
                 modelId=self.model_id,
                 system=[{"text": SYSTEM_PROMPT}],
@@ -55,7 +62,7 @@ class BedrockReviewer:
             if len(text.encode("utf-8")) > MAX_RESPONSE_BYTES:
                 raise IntegrationError("model_response_too_large")
             return text
-        except IntegrationError:
+        except (IntegrationError, SkipReview):
             raise
         except Exception:
             raise IntegrationError("bedrock_request_failed") from None

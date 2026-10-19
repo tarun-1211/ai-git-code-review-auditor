@@ -5,6 +5,7 @@ import unittest
 from unittest.mock import Mock, patch
 
 from auditor.diff import build_diff
+from auditor.config import DEFAULT_MODEL_ID
 from auditor.errors import IntegrationError, SkipReview
 from auditor.handler import lambda_handler
 from auditor.pipeline import ReviewPipeline, build_pipeline, render_comment
@@ -201,7 +202,8 @@ class PipelineTests(unittest.TestCase):
         ]
         bedrock.converse.return_value = {"stopReason": "end_turn", "output": {"message": {
             "role": "assistant", "content": [{"text": json.dumps(make_review())}]}}}
-        pipeline = build_pipeline(make_settings(), github_opener=opener, bedrock_client=bedrock, dynamodb_table=table)
+        pipeline = build_pipeline(make_settings(model_id=DEFAULT_MODEL_ID), github_opener=opener,
+                                  bedrock_client=bedrock, dynamodb_table=table)
         with patch.dict(os.environ, {"GITHUB_REPOSITORY": TEST_REPOSITORY,
                                     "GITHUB_WEBHOOK_SECRET": TEST_SECRET}, clear=True):
             first = lambda_handler(make_event(), None, pipeline=pipeline)
@@ -212,6 +214,10 @@ class PipelineTests(unittest.TestCase):
         self.assertEqual(record["review"], make_review())
         self.assertEqual(record["status"], "completed")
         self.assertEqual(record["comment_id"], 123)
+        self.assertEqual(record["model_id"], DEFAULT_MODEL_ID)
         self.assertNotIn("fake-github-token", json.dumps(record))
         bedrock.converse.assert_called_once()
+        self.assertEqual(bedrock.converse.call_args.kwargs["modelId"], DEFAULT_MODEL_ID)
+        self.assertEqual(bedrock.converse.call_args.kwargs["inferenceConfig"], {"maxTokens": 1024})
+        self.assertNotIn("serviceTier", bedrock.converse.call_args.kwargs)
         self.assertEqual(opener.open.call_count, 5)

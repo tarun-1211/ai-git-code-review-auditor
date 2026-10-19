@@ -121,10 +121,36 @@ commit. Base changes with the same head do not create a new review key.
 
 `BedrockReviewer` uses boto3's
 [Converse API](https://docs.aws.amazon.com/bedrock/latest/userguide/conversation-inference.html).
-Choose a model or inference profile supporting Converse, text messages, system
-prompts, and the output token limit in your region. No model ID or region is
-assumed. Models requiring another inference API are outside this adapter's scope.
-Availability and access must be confirmed before approved live inference.
+`Settings.from_env()` now defaults `BEDROCK_MODEL_ID` to
+**`global.amazon.nova-2-lite-v1:0`**, the Amazon Nova 2 Lite Global inference
+profile listed in [AWS's Nova 2 documentation](https://docs.aws.amazon.com/nova/latest/nova2-userguide/core-inference.html).
+An explicit `BEDROCK_MODEL_ID` still overrides it; a blank value fails validation.
+Direct `Settings(...)` construction retains its explicit model argument for
+compatibility. `AWS_REGION` remains required for the AWS client; Global inference
+does not remove the need to choose a supported source region and confirm access.
+An alternative model must support Converse, text/system prompts, and the output
+token limit. Models requiring another inference API are outside this adapter.
+
+Requests use the **Standard inference tier** by omitting the optional service
+tier parameter, as described in [AWS's tier documentation](https://docs.aws.amazon.com/bedrock/latest/userguide/service-tiers-inference.html).
+There is no Priority tier or performance optimization setting. Nova extended
+thinking remains disabled by omission, its documented
+[default](https://docs.aws.amazon.com/nova/latest/nova2-userguide/using-converse-api.html).
+The existing text-only findings parser and pipeline remain compatible.
+
+**Live inference stays disabled.** `ENABLE_LIVE_BEDROCK=false` is the default.
+Without an injected client, the adapter raises `live_bedrock_disabled` before
+importing boto3 or discovering credentials. Tests inject mocks and do not need
+the opt-in. Injected clients are caller-controlled and bypass this construction
+guard, so only test doubles should be supplied during local development.
+The mocked SDK-construction test also verifies the opt-in path without AWS.
+
+A later live call requires explicit approval, confirmation of source region,
+profile access and IAM, then an intentional `ENABLE_LIVE_BEDROCK=true` setting
+when constructing an adapter-owned client. Setting the variable alone does not
+invoke inference or connect the inactive webhook handler. Real client wiring
+and the asynchronous deployment path still need a later stage. No live call has
+been enabled or verified here.
 
 The system prompt treats code, comments, and filenames as untrusted data,
 instructs the model to express uncertainty, and requests one JSON object. The
@@ -133,6 +159,14 @@ input byte limit includes both the system prompt and serialized user text.
 or dollar spending caps. Truncation, content filtering, tool output, and
 unexpected response formats are rejected. AWS SDK retries are disabled for
 these clients to avoid hidden repeated calls.
+
+Conservative defaults are 16,000 diff bytes, 24,000 combined prompt bytes, and
+1,024 output tokens, all configurable through the existing size/token variables.
+Oversized inputs skip the entire review before inference. The smaller output
+budget may truncate a review with many findings; truncated output is rejected
+and is never saved or posted as a successful review. The 60-second SDK read
+timeout remains in place; a timeout is an error, not proof that inference did
+not run or incur charges. No automatic inference retry is made.
 
 The existing `parse_review()` validates output before it is saved as a review
 or posted:
@@ -206,12 +240,13 @@ loaded automatically. Tests supply fake configuration themselves.
 | `GITHUB_REPOSITORY` | Exact allowed target, read by handler and Settings | Required |
 | `GITHUB_TOKEN` | Fine-grained token restricted to that repository | Required by Settings |
 | `AWS_REGION` | Bedrock/DynamoDB region; automatic inside Lambda | Required by Settings |
-| `BEDROCK_MODEL_ID` | Converse-compatible model/profile ID | Required by Settings |
+| `BEDROCK_MODEL_ID` | Converse-compatible model/profile ID | `global.amazon.nova-2-lite-v1:0` via environment loader |
+| `ENABLE_LIVE_BEDROCK` | Allow adapter-owned real Bedrock client construction | `false` |
 | `DYNAMODB_TABLE_NAME` | Existing table with `review_id` partition key | Required by Settings |
-| `MAX_DIFF_BYTES` | Complete serialized patches, UTF-8 bytes | 32000 |
+| `MAX_DIFF_BYTES` | Complete serialized patches, UTF-8 bytes | 16000 |
 | `MAX_FILES` | Whole PR file count, at most 100 | 50 |
-| `MAX_MODEL_INPUT_BYTES` | System prompt plus serialized user text | 48000 |
-| `MAX_OUTPUT_TOKENS` | Generated tokens, at most 4096 | 2000 |
+| `MAX_MODEL_INPUT_BYTES` | System prompt plus serialized user text | 24000 |
+| `MAX_OUTPUT_TOKENS` | Generated tokens, at most 4096 | 1024 |
 
 For the stated target, the non-secret repository setting will be:
 
@@ -277,7 +312,7 @@ Estimate after choosing a region, model, and PR volume using
 [Bedrock's current rates](https://aws.amazon.com/bedrock/pricing/). Free tier
 eligibility varies; size limits and alerts do not guarantee zero charges.
 
-Next decisions: choose a region and compatible Bedrock model/profile, then plan
-the asynchronous worker wiring, recovery procedure, IAM, and deployment. Real
+Next decisions: choose a source region and confirm Nova 2 Lite Global profile
+access, then plan asynchronous worker wiring, recovery, IAM, and deployment. Real
 tokens, webhooks, table creation, live comments, and inference can wait until
 that setup is explicitly approved.

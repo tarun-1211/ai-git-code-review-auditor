@@ -131,7 +131,7 @@ class AdapterTests(unittest.TestCase):
         self.assertEqual(args["modelId"], "fake-converse-model")
         self.assertEqual(args["system"], [{"text": SYSTEM_PROMPT}])
         self.assertEqual(json.loads(args["messages"][0]["content"][0]["text"])["untrusted_pr_diff"], self.diff.text)
-        self.assertEqual(args["inferenceConfig"], {"maxTokens": 2000})
+        self.assertEqual(args["inferenceConfig"], {"maxTokens": 1024})
 
     def test_bedrock_input_limit_prevents_inference(self):
         client = Mock()
@@ -157,7 +157,7 @@ class AdapterTests(unittest.TestCase):
     def test_boto3_constructors_use_explicit_region_and_table_without_real_sdk(self):
         boto3, botoconfig = Mock(), Mock()
         with patch.dict(sys.modules, {"boto3": boto3, "botocore.config": botoconfig}):
-            BedrockReviewer(self.settings)
+            BedrockReviewer(make_settings(enable_live_bedrock=True))
             DynamoDBStore(self.settings)
         self.assertEqual(boto3.client.call_args.args, ("bedrock-runtime",))
         self.assertEqual(boto3.client.call_args.kwargs["region_name"], self.settings.region)
