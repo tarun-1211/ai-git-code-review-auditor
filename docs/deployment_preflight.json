@@ -1,0 +1,61 @@
+{
+  "status": "blocked_before_resource_creation",
+  "region": "ap-south-1",
+  "repository": "yxshxsmv/auditor-demo",
+  "local_verification": {
+    "python": "3.14.7",
+    "offline_tests_passed": 236,
+    "python312_syntax_checked": true,
+    "python312_execution_verified": false,
+    "fixture_rules": ["PY-PICKLE", "PY-YAML", "PY-SHELL"],
+    "fixture_lines": [3, 4, 5]
+  },
+  "artifact": {
+    "complete_release_available": false,
+    "sha256": null,
+    "build_attempt": "dependency_download_or_install_failed",
+    "observed_network_failures": ["pypi.org DNS resolution", "pypi.org direct HTTPS connection"],
+    "python312_workflow": "implemented_locally_not_published_or_run"
+  },
+  "aws": {
+    "identity_authenticated": false,
+    "identity_check": "AWS STS endpoint connection unavailable",
+    "intended_name_collisions": "unverified",
+    "creation_permissions": "unverified",
+    "free_plan_service_eligibility": "unverified",
+    "credits_and_billing_coverage": "user_reported_not_independently_verified",
+    "resources_created": false,
+    "resource_approval_received": false
+  },
+  "github": {
+    "project": "yxshxsmv/ai-git-code-review-auditor",
+    "connected_tool_project_read": true,
+    "connected_tool_project_push": false,
+    "demo_repository": "404_absent_or_inaccessible_to_connected_tool",
+    "webhook_installed": false,
+    "live_pr_comment_verified": false,
+    "commits_or_pushes_performed": false
+  },
+  "proposed_resources_only": {
+    "functions": ["auditor-demo-intake", "auditor-demo-worker"],
+    "runtime": "python3.12",
+    "architecture": "x86_64",
+    "memory_mb_each": 256,
+    "intake_timeout_seconds": 10,
+    "worker_timeout_seconds": 120,
+    "worker_function_error_retries": 0,
+    "worker_event_age_seconds": 300,
+    "table": "auditor-demo-reviews",
+    "partition_key": {"name": "review_id", "type": "String"},
+    "billing_mode": "PAY_PER_REQUEST",
+    "api": "auditor-demo-http",
+    "route": "POST /webhook",
+    "api_payload_version": "2.0",
+    "stage": "$default",
+    "log_groups": ["/aws/lambda/auditor-demo-intake", "/aws/lambda/auditor-demo-worker"],
+    "log_retention_days": 1,
+    "roles": ["auditor-demo-intake-role", "auditor-demo-worker-role"],
+    "review_provider": "rules",
+    "live_model_providers_enabled": false
+  }
+}

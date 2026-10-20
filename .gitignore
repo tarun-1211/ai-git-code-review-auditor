@@ -9,3 +9,5 @@ samconfig.toml
 env.local.json
 .coverage
 .pytest_cache/
+dist/
+.demo-private/

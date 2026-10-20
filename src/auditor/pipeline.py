@@ -2,6 +2,7 @@
 
 import html
 import logging
+from urllib.parse import quote
 
 from .errors import IntegrationError, SkipReview
 from .findings import parse_review
@@ -24,6 +25,7 @@ def render_comment(pr, review, *, result=None):
     if combined:
         notice = "Deterministic checks and AI analysis completed. " + notice
     parts = [f"### {title} · commit {pr.head_sha[:12]}", notice]
+    parts.append(f"**Findings: {len(review['findings'])}** · Human verification is required.")
     if rules and result.ai_status == "unavailable":
         parts.append("AI provider unavailable; this is an explicitly configured rule-based fallback.")
     parts.append("<pre>" + safe(review["summary"]) + "</pre>")
@@ -41,6 +43,13 @@ def render_comment(pr, review, *, result=None):
                 f"{finding['description']}\nReasoning: {finding['reasoning']}\n"
                 f"Suggested fix: {finding['suggested_fix']}")
         parts.append("<pre>" + safe(text) + "</pre>")
+        if finding['file'] is not None and finding['line'] is not None:
+            # Only our fixed GitHub origin and validated commit identity form
+            # links. Encode paths; never turn reviewer text into Markdown URLs.
+            target = (f"https://github.com/{quote(pr.repository, safe='/')}/blob/"
+                      f"{quote(pr.head_sha, safe='')}/{quote(finding['file'], safe='/')}"
+                      f"#L{finding['line']}")
+            parts.append(f"[View source at this commit]({target})")
     if not review["findings"]:
         parts.append("No findings reported; this is not a security guarantee.")
     comment = "\n\n".join(parts)

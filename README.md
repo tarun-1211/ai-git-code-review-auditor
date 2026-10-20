@@ -4,7 +4,8 @@ A Python project that reviews GitHub Pull Request diffs using deterministic
 security rules alongside an optional configurable AI provider, stores findings through a
 DynamoDB adapter, and prepares one readable PR comment through a GitHub adapter.
 
-**Status: Lambda runtime composition implemented and tested offline.** Intake,
+**Status: runtime, guarded deployment tools and a manual Python 3.12 build workflow
+implemented locally and tested offline.** Intake,
 async Lambda submission, worker events, combined reviews, and persistence run with mocked Lambda, GitHub,
 AI-provider, and DynamoDB dependencies. Nothing has been deployed,
 no live integrations have been verified, and no cloud account or credentials
@@ -18,6 +19,31 @@ infrastructure and does not upgrade any account or enable paid plans.
 Target repository: `yxshxsmv/Gateway-LLM-and-context-ernicher`. This is a
 configuration choice, not a hardcoded default. The application has not accessed
 or modified this repository.
+
+## Real PR demo setup
+
+The first live demonstration targets a separate `yxshxsmv/auditor-demo` repository
+using **`REVIEW_PROVIDER=rules`**. This is deterministic analysis; AI is disabled.
+The [live demo runbook](docs/live_demo.md) includes exact configuration,
+credential setup, AWS approval gates, a tested five-line fixture, live
+verification commands, a 2–3 minute recording script and cleanup instructions.
+
+- Build: manually run [Build verified Lambda ZIP](.github/workflows/build-lambda.yml)
+  on GitHub's Python 3.12 runner after publication/run approval. It runs offline
+  tests and packages boto3, dependencies and service models with the application.
+- Preview: `python3 -m tools.deploy_demo plan` is offline.
+- Check access/collisions: `python3 -m tools.deploy_demo preflight` is read-only.
+- Create: `tools.deploy_demo apply` additionally requires explicit resource
+  approval, the `--approve-create-resources` flag, a validated release and private
+  credentials. No existing resources are overwritten or deleted.
+- Verify: `PYTHONPATH=src python3 -m tools.verify_demo --pr-number NUMBER` checks
+  the actual GitHub comment against its completed DynamoDB record.
+
+The complete ZIP and Python 3.12 execution remain unverified here: dependency
+downloads and AWS STS are unreachable from the agent shell. The workflow is
+local/unpublished; nothing has been deployed or verified against a live PR.
+System Python is unchanged. A real demo requires the eventual GitHub comment,
+webhook response, Lambda logs and matching table item; mocks do not establish it.
 
 ## Local testing
 
@@ -58,7 +84,7 @@ For the Lambda dispatcher and explicit runtime composition:
 PYTHONPATH=src python3 -m unittest tests.test_lambda_dispatch tests.test_runtime -v
 ```
 
-The complete offline suite currently contains **205 passing tests**, including
+The complete offline suite currently contains **236 passing tests**, including
 the unchanged 179-test baseline. Tests use
 an in-memory queue to acknowledge intake before executing the worker; no AWS
 asynchronous invocation or other real API is performed.
@@ -73,7 +99,7 @@ and safe errors. The original webhook and findings tests remain in the suite.
 The [prior audit report](docs/offline_audit.md) records the 139-test baseline
 and the earlier missing application boundaries. Those boundaries and combined
 reviews and runtime composition are now implemented locally as described below;
-infrastructure remains absent. [Current captured outputs](docs/audit_samples.json) contain only
+infrastructure remains absent. [Captured synthetic outputs](docs/audit_samples.json) contain only
 synthetic code, fake identifiers, and mocked service results. Regenerate them with:
 
 ```bash
@@ -162,8 +188,9 @@ rejected. The payload cannot override the target. Response bodies are closed
 without being read/logged. Errors are sanitized and never retried by the adapter.
 An accepted submission still says nothing about the eventual worker result.
 
-No resource, queue service, template, or deployment script is included. The
-dispatcher is tested with fake clients; no Lambda invocation has occurred.
+The guarded deployment command is documented in [the live runbook](docs/live_demo.md).
+No resources or queue services were created. The dispatcher is tested with fake
+clients; no live Lambda invocation has occurred.
 
 ### Worker event v1
 
@@ -611,57 +638,25 @@ execution role rather than embedded AWS keys.
 | `tests/` | Offline unit and integration tests |
 | `requirements.txt` | boto3 for future real AWS clients |
 
-## Packaging for the future Lambda runtime
+## Packaging for the Lambda runtime
 
-Use the existing Python 3.12 project target and configure both future functions
-with runtime **`python3.12`**. Current local verification ran on Python 3.14.7;
-Python 3.12 is not installed in this workspace. A regression check parses every
-application module with Python 3.12 syntax rules, but this is not an execution
-test on Python 3.12. Run the full offline suite under Python 3.12 before deploying.
-Region/account runtime availability still needs manual verification.
-
-There was no existing build/deployment framework or package manifest beyond
-`requirements.txt`. That file remains unchanged (`boto3>=1.40,<2`), which already
-covers Lambda and DynamoDB; HTTP and review code use the standard library.
-Use one zip containing `auditor/` at its root and the resolved boto3 dependencies.
-Bundle the SDK and its dependencies together to avoid mixing partial bundled
-dependencies with runtime SDK versions. Do not include `.env`, tests, docs,
-credential files, caches, or the whole repository.
-
-The following are **future packaging instructions only**, not commands run in
-this task. Use a fresh staging directory. Dependency installation may download
-packages, so it is outside the current offline verification:
-
-```bash
-mkdir /tmp/auditor-lambda-package
-python3.12 -m pip install --requirement requirements.txt --target /tmp/auditor-lambda-package
-python3.12 - <<'PY'
-from pathlib import Path
-import shutil
-import zipfile
-
-stage = Path('/tmp/auditor-lambda-package')
-shutil.copytree('src/auditor', stage / 'auditor',
-                ignore=shutil.ignore_patterns('__pycache__', '*.pyc'))
-with zipfile.ZipFile('/tmp/auditor-lambda.zip', 'w', zipfile.ZIP_DEFLATED) as bundle:
-    for path in sorted(stage.rglob('*')):
-        if path.is_file() and '__pycache__' not in path.parts and path.suffix != '.pyc':
-            bundle.write(path, path.relative_to(stage))
-PY
-```
-
-The same zip can serve both handler names above; no container, layer, or S3 bucket
-is required by this packaging approach. The dependency range is not a release
-lockfile; record resolved versions when preparing a future reproducible release.
-No packages were installed/upgraded and no deployment bundle was built here.
+Use the manual GitHub Actions workflow and [build instructions](docs/live_demo.md#1-build-on-githubs-python-312-runner).
+They avoid installing Python 3.12 or Docker locally and retain system Python.
+`tools/build_lambda.py` stages the unchanged `boto3>=1.40,<2` requirement for
+Python 3.12/x86_64, includes every runtime dependency/service model, checks ZIP
+integrity and isolated imports, and emits a SHA-256 manifest and exact wheel inputs.
+The same ZIP serves `auditor.runtime.intake_handler` and
+`auditor.runtime.worker_handler`; no layer, container or S3 bucket is required.
+Only the runner's actual Python 3.12 execution establishes that release check.
+The historical source-only ZIP is not a release artifact. No complete new ZIP
+was built here because public dependency downloads were unreachable.
 
 ## Deployment, permissions, and costs
 
-No deployment or infrastructure changes are included or authorized here. The
-existing AWS adapters and conceptual architecture are retained without creating
-resources. No IAM policies, permissions, dependency upgrades, account plan
-changes, or billing changes were made. Bedrock inference permissions are not
-needed by the intended Groq path.
+Deployment preparation is implemented; resource creation requires separate
+explicit approval after artifact, account/access, collision and billing checks.
+No AWS resources, live IAM policies, account plans or billing settings have been
+changed. The first deployment is rules-only and needs no inference permissions.
 
 Local tests use mocks and make no service requests. Future real Groq, GitHub,
 or AWS usage must be evaluated separately; provider names, quotas, byte limits,
@@ -690,10 +685,10 @@ roles trusted by Lambda:
 - The GitHub token needs repository-scoped PR reads and comment writes; it is
   not an AWS permission. Keep it out of intake and invocation payloads.
 
-Configure asynchronous worker retries separately (start with zero automatic
-retries), bounded event age/concurrency/timeouts, and a manual reconciliation
-procedure for failed/in-progress/uncertain records. The code does not apply
-these AWS settings or create any resources. No automatic claim reclaim exists;
+The approved-only deployment command configures zero function-error retries,
+300-second event age and bounded timeouts. There is no automatic claim reclaim;
+failed/in-progress/uncertain work needs manual reconciliation. No resource has
+been created by that command here;
 accepted intake does not guarantee worker completion or atomic exactly-once
 delivery. A dispatch timeout may occur after AWS accepted an event; reconcile
 before redelivering. Initialization failures before a claim may have no DynamoDB

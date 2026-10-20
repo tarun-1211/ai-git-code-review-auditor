@@ -1,0 +1,5 @@
+def demo_only(payload):
+    import pickle, subprocess, yaml
+    pickle.loads(payload)
+    yaml.unsafe_load(payload)
+    subprocess.run(payload, shell=True)
