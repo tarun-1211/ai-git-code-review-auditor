@@ -1,11 +1,12 @@
 # AI GitHub Code Review & Security Auditor
 
-A Python project that reviews GitHub Pull Request diffs using a configurable AI
-provider or limited deterministic security rules, stores findings through a
+A Python project that reviews GitHub Pull Request diffs using deterministic
+security rules alongside an optional configurable AI provider, stores findings through a
 DynamoDB adapter, and prepares one readable PR comment through a GitHub adapter.
 
-**Status: Stage 2A — local integration layer.** The complete code path runs with
-mocked GitHub, AI-provider, and DynamoDB dependencies. Nothing has been deployed,
+**Status: Lambda runtime composition implemented and tested offline.** Intake,
+async Lambda submission, worker events, combined reviews, and persistence run with mocked Lambda, GitHub,
+AI-provider, and DynamoDB dependencies. Nothing has been deployed,
 no live integrations have been verified, and no cloud account or credentials
 are needed for the tests.
 
@@ -26,9 +27,9 @@ Use Python 3.12 or newer. From this directory:
 PYTHONPATH=src python3 -m unittest discover -s tests -v
 ```
 
-Tests use only the Python standard library. boto3 is listed in
-`requirements.txt` for future real AWS clients, but it is not installed or
-imported by the mocked tests. No Docker, tokens, webhooks, internet connection,
+Tests use only the Python standard library. boto3 is already listed in
+`requirements.txt`; tests replace SDK modules/clients with fakes, so installing
+the real SDK is unnecessary for the suite. No Docker, tokens, webhooks, internet connection,
 or paid services are required.
 
 To follow one complete signed webhook through the real adapter code with mock
@@ -45,6 +46,23 @@ Groq and rules paths, still completely offline:
 PYTHONPATH=src python3 -m unittest tests.test_providers tests.test_rules tests.test_provider_pipeline -v
 ```
 
+For the intake/worker contract and combined-review milestone:
+
+```bash
+PYTHONPATH=src python3 -m unittest tests.test_async_boundary tests.test_async_pipeline tests.test_combined -v
+```
+
+For the Lambda dispatcher and explicit runtime composition:
+
+```bash
+PYTHONPATH=src python3 -m unittest tests.test_lambda_dispatch tests.test_runtime -v
+```
+
+The complete offline suite currently contains **205 passing tests**, including
+the unchanged 179-test baseline. Tests use
+an in-memory queue to acknowledge intake before executing the worker; no AWS
+asynchronous invocation or other real API is performed.
+
 The integration tests block socket connection creation and inject every external
 dependency. They cover success, duplicate claims, malformed AI responses,
 incomplete diffs, stale commits, dependency failures, ambiguous comment delivery,
@@ -52,9 +70,10 @@ and safe errors. The original webhook and findings tests remain in the suite.
 
 ### Offline quality and deployment-readiness audit
 
-See [the audit report](docs/offline_audit.md) for representative comments,
-validation limits, configuration requirements, and the missing asynchronous
-deployment components. [Captured outputs](docs/audit_samples.json) contain only
+The [prior audit report](docs/offline_audit.md) records the 139-test baseline
+and the earlier missing application boundaries. Those boundaries and combined
+reviews and runtime composition are now implemented locally as described below;
+infrastructure remains absent. [Current captured outputs](docs/audit_samples.json) contain only
 synthetic code, fake identifiers, and mocked service results. Regenerate them with:
 
 ```bash
@@ -69,10 +88,14 @@ construction, injects every dependency, and leaves live-provider flags false.
 ```mermaid
 flowchart LR
     Event[Signed webhook] --> Validate[Verify signature and validate PR]
-    Validate --> Claim[DynamoDB conditional claim]
+    Validate --> Dispatch[Injected async dispatcher]
+    Dispatch --> Ack[202 accepted after submission]
+    Dispatch --> Worker[Validate versioned worker event]
+    Worker --> Claim[DynamoDB conditional claim]
     Claim --> Diff[GitHub patches and commit checks]
-    Diff --> AI[Selected reviewer: Groq or local rules]
-    AI --> Parse[Validate findings and locations]
+    Diff --> Rules[Deterministic rules]
+    Rules --> AI[Optional configured AI reviewer]
+    AI --> Parse[Merge and validate findings and provenance]
     Parse --> Save[DynamoDB structured review]
     Save --> Check[Recheck PR commit and base]
     Check --> Comment[One GitHub summary comment]
@@ -90,6 +113,10 @@ dynamodb_table=...)` connects explicit GitHub/DynamoDB test transports and uses
 for `rules`, no provider transport or key is needed. Missing GitHub/table
 dependencies fail closed. An explicit `reviewer=` can also be injected directly.
 See `tests/test_provider_pipeline.py` for complete mocked examples.
+The factory composes every selected AI adapter with the baseline rules. A
+directly injected `reviewer=` is a caller-owned test/custom dependency; supply
+`CombinedReviewer` when composing a custom AI path. Standalone AI adapters
+remain independently testable and do not themselves run the rules.
 
 The old `bedrock_client=` argument remains supported for existing tests and
 callers; it explicitly selects the archived adapter when the provider is
@@ -97,17 +124,129 @@ otherwise disabled. No factory ever constructs a Bedrock client. The legacy
 `bedrock_failed` failure label is retained for untyped legacy reviewers; new
 providers use `provider_failed` and rules use `rules_failed`.
 
-`lambda_handler(event, context, pipeline=pipeline)` runs the pipeline
-synchronously for local testing, after signature and event validation. It
-passes a validated `PullRequest` to the pipeline. Normal two-argument calls have
-no configured pipeline and return `503` for supported PR events. The handler
-does not read integration settings or construct clients automatically.
+### Intake, dispatch, and worker responsibilities
 
-This synchronous path is **not ready for a live webhook**. GitHub expects a
-response within [10 seconds](https://docs.github.com/en/webhooks/using-webhooks/best-practices-for-using-webhooks).
-A later stage will add a short intake Lambda and invoke a review worker using
-[Lambda's asynchronous invocation](https://docs.aws.amazon.com/lambda/latest/dg/invocation-async.html).
-No queue service or worker infrastructure has been added.
+`auditor.handler.lambda_handler(event, context, dispatcher=dispatcher)` verifies
+the webhook and submits only validated PR identity to the injected dispatcher.
+`Dispatcher.dispatch(worker_event)` must return the literal `True` only after
+asynchronous submission is accepted, without running the review inline. Intake
+then returns HTTP `202`, `accepted`; this does not mean a review has completed.
+Rejection, an ambiguous acknowledgement, or a dispatch exception returns `502`,
+`review_dispatch_failed`, with no application retry and no dependency details.
+
+`auditor.worker.worker_handler(worker_event, context, pipeline=pipeline,
+allowed_repository=repository)` revalidates the internal contract/allowlist,
+then calls the existing pipeline. Without an explicit repository argument it
+reads only `GITHUB_REPOSITORY`, not the webhook secret or integration Settings.
+It returns `status` and `review_id` for reviewed/reviewed_rules/duplicate/skipped.
+Failures raise fixed, sanitized `IntegrationError` exceptions and log safe
+messages so a future asynchronous runtime observes an error, not a successful
+return containing an error body. The pipeline continues to persist failure or
+comment uncertainty when a claim/state transition is available.
+
+The older `lambda_handler(..., pipeline=pipeline)` synchronous path remains for
+local compatibility. Supplying both dispatcher and pipeline fails closed.
+Normal two-argument intake/worker calls do not construct dependencies: intake
+returns `503` for supported PRs, and a configured worker without a pipeline
+raises `review_pipeline_not_configured`. These pure handlers remain usable with
+injected test dependencies. The separate guarded AWS entry points are below.
+
+`LambdaDispatcher` implements
+[Lambda asynchronous invocation](https://docs.aws.amazon.com/lambda/latest/dg/invocation-async.html).
+Its constructor requires an explicit Lambda client, fixed configured worker
+function, and repository. It revalidates the bounded event, calls `invoke` with
+`InvocationType="Event"`, and accepts only integer `StatusCode=202`, with
+consistent HTTP metadata when present and no error fields. Function names or
+ARNs can have an optional alias/version; URLs, wildcards, and placeholders are
+rejected. The payload cannot override the target. Response bodies are closed
+without being read/logged. Errors are sanitized and never retried by the adapter.
+An accepted submission still says nothing about the eventual worker result.
+
+No resource, queue service, template, or deployment script is included. The
+dispatcher is tested with fake clients; no Lambda invocation has occurred.
+
+### Worker event v1
+
+The decoded event must be exactly this flat object, with no extra fields:
+
+```json
+{
+  "version": 1,
+  "repository": "owner/repository",
+  "pr_number": 7,
+  "head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "action": "opened"
+}
+```
+
+`build_worker_event(PullRequest)` emits normalized repository/SHA strings.
+`parse_worker_event(..., allowed_repository=...)` requires integer version `1`,
+a valid allowlisted repository, an actual integer PR number from 1 through
+`2**63 - 1`, a 40-character hexadecimal SHA, and action opened/reopened/synchronize.
+Booleans are not integers for this contract. Strings/types are bounded before
+encoding; compact UTF-8 JSON is limited to **1,024 bytes** by a code constant.
+Malformed, oversized, unknown-version, or wrong-repository events never reach
+the pipeline. The event contains no credentials, secret, code, diff, webhook
+body/headers, arbitrary URLs, or redundant review ID; that ID is derived again.
+
+The worker event is an internal contract, not a replacement for webhook HMAC.
+A future deployment must restrict invocation of the worker through IAM. Duplicate
+intake deliveries may submit identical events; the worker's DynamoDB conditional
+claim ensures only one proceeds to review/comment. An uncertain dispatch can
+also be delivered despite an intake error, so blind retries are not added.
+
+## Lambda runtime composition
+
+The two AWS handler names for the future zip package are:
+
+| Function | Handler |
+| --- | --- |
+| Webhook intake | `auditor.runtime.intake_handler` |
+| Review worker | `auditor.runtime.worker_handler` |
+
+Importing `auditor.runtime` creates no SDK client, HTTP opener, pipeline, or
+credential lookup. The two-argument entry points lazily validate configuration
+and initialize dependencies on their first invocation, then reuse them on warm
+invocations. **`ENABLE_AWS_RUNTIME=false` is the default and prevents SDK
+construction/credential discovery before configuration secrets are read.**
+Keep it false now. Any future enabling requires separate approval and account
+eligibility/cost checks; it is not an authorization to invoke a paid model.
+Initialization errors raise fixed `intake_initialization_failed` or
+`worker_initialization_failed` exceptions and log no underlying exception text.
+
+For offline composition use the factories instead; they never construct clients:
+
+```python
+from auditor.runtime import create_intake_handler, create_worker_handler
+
+# lambda_client, github_opener, and table are injected fakes during local work.
+# Configuration is validated and snapshotted when the factory is called.
+intake = create_intake_handler(lambda_client=lambda_client)
+worker = create_worker_handler(github_opener=github_opener, dynamodb_table=table)
+```
+
+Both factories also accept an explicit `settings=` object for tests. Intake
+uses `IntakeRuntimeSettings`; worker uses the existing `Settings`. A configured
+AI test can inject `provider_opener=` without enabling a live flag. Missing
+clients/transports fail initialization instead of constructing replacements.
+If live Groq is selected in settings, its factory additionally requires an
+explicit provider opener; it cannot delegate implicit construction to the adapter.
+Intake passes its captured secret/allowlist explicitly to the existing handler;
+worker passes its captured allowlist and composed pipeline to the worker handler.
+
+When separately enabled in AWS, intake explicitly creates a regional Lambda
+client with 2-second connection / 3-second read timeouts. Worker explicitly
+creates a DynamoDB resource/table handle with 5-second connection / 10-second
+read timeouts and a redirect-refusing GitHub HTTP opener. Both SDK configurations
+use one total attempt, disabling SDK retries. A Groq HTTP opener is constructed
+only if Groq is selected **and** `ENABLE_LIVE_GROQ=true`; otherwise the existing
+provider guard/fallback policy applies. Bedrock runtime selection is rejected
+before SDK construction; its archived injected adapter remains available in the
+lower-level code/tests. No new SDK dependency was added.
+
+These timeouts do not guarantee a webhook latency or cost bound. Lambda's own
+asynchronous delivery retry policy is separate from SDK retries and must be
+configured explicitly during a future approved deployment.
 
 ## Webhook behavior
 
@@ -121,9 +260,11 @@ numbers, and full head SHA validation. PRs from forks are supported.
 | Request | Response |
 | --- | --- |
 | Valid signed irrelevant event/action or ping | `200`, `ignored` |
-| Supported PR without an injected pipeline | `503`, `review_pipeline_not_configured` |
-| Completed injected pipeline | `200`, `reviewed`, `reviewed_rules`, `duplicate`, or `skipped` |
-| Injected pipeline failure | `502`, `review_pipeline_failed` |
+| Valid PR accepted by injected dispatcher | `202`, `accepted` (submission only) |
+| Dispatch rejection/failure | `502`, `review_dispatch_failed` |
+| Supported PR without dispatcher or legacy pipeline | `503`, `review_pipeline_not_configured` |
+| Completed legacy injected pipeline | `200`, `reviewed`, `reviewed_rules`, `duplicate`, or `skipped` |
+| Legacy injected pipeline failure | `502`, `review_pipeline_failed` |
 | Invalid signature / payload / repository / content type / oversized body | `401` / `400` / `403` / `415` / `413` |
 | Missing handler configuration or unexpected validation failure | `500` |
 
@@ -194,7 +335,7 @@ before a request is made. A missing mock therefore does not cause a live call.
 Explicit injected transports are caller-controlled test dependencies; they
 must remain mocks during development. Tests additionally block network socket
 connections. A live transport must not be supplied under the current task's
-constraints. The handler remains inactive without an explicitly injected pipeline.
+constraints. Worker execution requires an explicitly injected pipeline.
 
 **Verify Groq free-tier model availability, quotas, and billing behavior manually
 before considering any later live integration.** No model is assumed available
@@ -205,13 +346,43 @@ proof that a remote request did not run; the code does not retry it.
 
 ### Deterministic rules and explicit fallback
 
-`REVIEW_PROVIDER=rules` runs only local checks. `ENABLE_RULE_FALLBACK=true`
+`REVIEW_PROVIDER=rules` runs only local checks. Selecting Groq runs the rules
+first and then AI, even if the provider succeeds. `ENABLE_RULE_FALLBACK=true`
 allows Groq availability failures (timeouts, connection failures, rate limits,
-authentication/server errors, or disabled live access) to run the local rules.
+authentication/server errors, or disabled live access) to return those rule results.
 It defaults to false. Invalid/truncated AI output, client request errors,
 oversized input, and diff validation failures **never** trigger fallback.
-A failed AI response is discarded completely; rule findings are generated
-independently from the full validated diff. No partial AI findings are merged.
+A failed AI response is discarded completely; rules run once, independently,
+over the full validated diff. No partial AI findings are merged. With fallback
+disabled, provider failure still fails the review without publishing the rules.
+
+### Combined findings and provenance
+
+`CombinedReviewer` validates both inputs and the final merged result with the
+unchanged findings schema. Rule findings come first, then AI findings. Only
+findings identical in all seven fields are consolidated; their origins are
+combined. Same file/line alone, different severity/confidence, different
+reasoning, or different suggested fixes never causes a finding to be dropped.
+Repeated exact findings from a single source keep that source only.
+
+Successful AI paths use `review_source=combined`, `ai_status=completed`, the
+AI provider/model, and a separate `rules_model_id`. A trusted positional
+`finding_sources` sidecar is stored as a list aligned exactly with `review.findings`,
+for example `[["rules"], ["ai"], ["rules", "ai"]]`. Every typed result, including
+rules-only/fallback, gets per-finding provenance. Count and source values are
+validated before saving/rendering; the model cannot add a `source` field to
+the strict schema. Legacy string results remain accepted for existing injected
+callers and receive no invented provenance.
+
+Combined comments say **AI review + rule-based security checks** and label each
+finding **Source: rule-based**, **Source: AI**, or both. The combined summary
+is generated by the application with a finding count and human-verification
+notice. A clean result still says it is not a security guarantee. The existing
+limits apply to the total result: over 20 distinct findings, over 64,000 review
+bytes, or over 60,000 rendered comment bytes fails explicitly, without silent
+truncation, partial publication, or discarding different findings to fit.
+
+### Rule coverage
 
 The rules cover added, single-line Python statements using:
 
@@ -227,7 +398,7 @@ not proof of an exploitable vulnerability. More than 20 rule findings causes
 an explicit failure instead of a partial result.
 
 Rule findings carry stable IDs such as `[Rule PY-PICKLE]` in their descriptions.
-Their comments say **Rule-based security checks** and **AI analysis was not
+Rules-only comments say **Rule-based security checks** and **AI analysis was not
 performed**. Fallback comments also say the AI provider was unavailable. The
 handler returns `reviewed_rules`, not an AI review result. Storage records
 `review_source`, `review_provider`, `review_model_id`, and `ai_status` separately
@@ -241,7 +412,8 @@ The Bedrock adapter and all Nova tests remain isolated and working with mocks.
 `ENABLE_LIVE_BEDROCK` stays false. Its old Nova model default remains only in
 legacy settings for backward compatibility; Groq uses `GROQ_MODEL_ID` instead.
 The provider factory requires an injected Bedrock client even if that old
-opt-in is true. Bedrock is not part of the intended live path. No inference
+opt-in is true and composes the archived adapter with the same baseline rules.
+Bedrock is not part of the intended live path. No inference
 permissions, plan upgrades, or real SDK clients are added by this pivot.
 
 ### Shared findings validation
@@ -324,6 +496,8 @@ loaded automatically. Tests supply fake configuration themselves.
 
 | Variable | Purpose | Default |
 | --- | --- | --- |
+| `ENABLE_AWS_RUNTIME` | Permit lazy SDK initialization in the two AWS entry points only | `false`; keep disabled now |
+| `WORKER_FUNCTION_NAME` | Intake's one configured worker name/ARN, optionally qualified | Required for intake composition |
 | `GITHUB_WEBHOOK_SECRET` | Shared HMAC secret, read by handler | Required |
 | `GITHUB_REPOSITORY` | Exact allowed target, read by handler and Settings | Required |
 | `GITHUB_TOKEN` | Fine-grained token restricted to that repository | Required by Settings |
@@ -334,8 +508,8 @@ loaded automatically. Tests supply fake configuration themselves.
 | `GROQ_TIMEOUT_SECONDS` | HTTP timeout, 1–60 seconds | 15 |
 | `GROQ_MAX_RESPONSE_BYTES` | Bounded HTTP response body | 96000 |
 | `ENABLE_LIVE_GROQ` | Allow constructing a real HTTP transport | `false` |
-| `ENABLE_RULE_FALLBACK` | Rules only on provider unavailability | `false` |
-| `AWS_REGION` | Retained DynamoDB adapter region | Required by existing Settings |
+| `ENABLE_RULE_FALLBACK` | Permit rules-only results when configured AI is unavailable | `false` |
+| `AWS_REGION` | Regional Lambda/DynamoDB clients | Automatically supplied by Lambda; fake value in local tests |
 | `BEDROCK_MODEL_ID` | Archived compatibility setting only | Original Nova default retained |
 | `ENABLE_LIVE_BEDROCK` | Archived direct-constructor opt-in; keep disabled | `false` |
 | `DYNAMODB_TABLE_NAME` | Existing table with `review_id` partition key | Required by Settings |
@@ -368,9 +542,37 @@ it never calls `Settings.from_env()`. The token is a GitHub worker setting,
 and the region/table describe DynamoDB persistence, not a separate backend
 server. The legacy Bedrock model value is also still validated by Settings,
 even for Groq/rules (its default means no Bedrock environment setting is needed).
+The pure worker handler needs only the repository allowlist plus an injected
+pipeline; runtime composition builds that pipeline using existing Settings.
+The AWS intake entry point additionally requires region and worker target.
+None of these settings, credentials, or retry options belongs in the worker event.
 For local deterministic work, select `REVIEW_PROVIDER=rules` and leave both live
 flags false. The offline tests are the supported local entry point; setting
 configuration variables does not itself run a pipeline or post a comment.
+
+### Exact variable split for future AWS wiring
+
+| Scope | Required values |
+| --- | --- |
+| Both AWS entry points | `GITHUB_REPOSITORY`, and the Lambda-provided `AWS_REGION`; `ENABLE_AWS_RUNTIME=true` only after deployment approval |
+| Intake only | `GITHUB_WEBHOOK_SECRET`, `WORKER_FUNCTION_NAME` |
+| Rules-only worker | `GITHUB_TOKEN`, `DYNAMODB_TABLE_NAME`, `REVIEW_PROVIDER=rules` |
+| Optional later Groq worker | `REVIEW_PROVIDER=groq`, `GROQ_MODEL_ID`, `GROQ_API_KEY`; existing endpoint/timeout/size/output options retain their defaults |
+
+`REVIEW_PROVIDER=disabled` remains the safe global default and fails worker
+runtime initialization; select `rules` explicitly for the first deployment.
+Rules-only execution needs no Groq key or model and no webhook secret in the
+worker. Intake needs no GitHub token, DynamoDB table, or model settings.
+`BEDROCK_MODEL_ID` need not be set because its legacy default remains; it is
+still validated by existing worker Settings. Keep `ENABLE_LIVE_BEDROCK=false`.
+Groq inference remains independently guarded by `ENABLE_LIVE_GROQ=false`.
+With Groq configured but disabled, explicit fallback may return rules-only
+results; without fallback the worker fails safely. Do not enable inference now.
+
+Lambda provides `AWS_REGION`; do not try to add it as a custom Lambda environment
+variable. `.env.example` includes only a placeholder for local fake configuration
+and is never loaded automatically. No application AWS access-key variables are
+needed: future real SDKs use the Lambda execution role, not embedded keys.
 
 Never paste credentials into chat or commit them. Settings representations omit
 the token. Errors and logs exclude payloads, headers, credentials, model output,
@@ -388,13 +590,18 @@ execution role rather than embedded AWS keys.
 
 | File | Responsibility |
 | --- | --- |
-| `src/auditor/handler.py` | HTTP API v2 intake and injected pipeline |
+| `src/auditor/handler.py` | HTTP API v2 intake/dispatch; legacy sync injection |
+| `src/auditor/dispatch.py` | Dispatcher protocol and bounded worker event v1 |
+| `src/auditor/lambda_dispatch.py` | Injected Lambda async invocation and acceptance checks |
+| `src/auditor/runtime.py` | Guarded AWS entry points and client-injected composition factories |
+| `src/auditor/worker.py` | Validated internal worker entry point |
 | `src/auditor/webhook.py` | Signatures, filtering, allowlist, PR identity |
 | `src/auditor/findings.py` | Existing strict findings validator |
 | `src/auditor/config.py` | Explicit settings and bounded limits |
 | `src/auditor/github.py` | GitHub HTTP client and commit checks |
 | `src/auditor/diff.py` | Patch completeness and line mapping |
 | `src/auditor/reviewers.py` | Reviewer protocol, provenance, explicit selection/fallback |
+| `src/auditor/combined.py` | Baseline rules plus AI, exact deduplication and provenance |
 | `src/auditor/groq.py` | Bounded standard-library chat-completions adapter |
 | `src/auditor/rules.py` | Limited deterministic Python security patterns |
 | `src/auditor/bedrock.py` | Archived, isolated boto3 Converse compatibility |
@@ -403,6 +610,50 @@ execution role rather than embedded AWS keys.
 | `src/auditor/errors.py` | Credential-free integration/skip errors |
 | `tests/` | Offline unit and integration tests |
 | `requirements.txt` | boto3 for future real AWS clients |
+
+## Packaging for the future Lambda runtime
+
+Use the existing Python 3.12 project target and configure both future functions
+with runtime **`python3.12`**. Current local verification ran on Python 3.14.7;
+Python 3.12 is not installed in this workspace. A regression check parses every
+application module with Python 3.12 syntax rules, but this is not an execution
+test on Python 3.12. Run the full offline suite under Python 3.12 before deploying.
+Region/account runtime availability still needs manual verification.
+
+There was no existing build/deployment framework or package manifest beyond
+`requirements.txt`. That file remains unchanged (`boto3>=1.40,<2`), which already
+covers Lambda and DynamoDB; HTTP and review code use the standard library.
+Use one zip containing `auditor/` at its root and the resolved boto3 dependencies.
+Bundle the SDK and its dependencies together to avoid mixing partial bundled
+dependencies with runtime SDK versions. Do not include `.env`, tests, docs,
+credential files, caches, or the whole repository.
+
+The following are **future packaging instructions only**, not commands run in
+this task. Use a fresh staging directory. Dependency installation may download
+packages, so it is outside the current offline verification:
+
+```bash
+mkdir /tmp/auditor-lambda-package
+python3.12 -m pip install --requirement requirements.txt --target /tmp/auditor-lambda-package
+python3.12 - <<'PY'
+from pathlib import Path
+import shutil
+import zipfile
+
+stage = Path('/tmp/auditor-lambda-package')
+shutil.copytree('src/auditor', stage / 'auditor',
+                ignore=shutil.ignore_patterns('__pycache__', '*.pyc'))
+with zipfile.ZipFile('/tmp/auditor-lambda.zip', 'w', zipfile.ZIP_DEFLATED) as bundle:
+    for path in sorted(stage.rglob('*')):
+        if path.is_file() and '__pycache__' not in path.parts and path.suffix != '.pyc':
+            bundle.write(path, path.relative_to(stage))
+PY
+```
+
+The same zip can serve both handler names above; no container, layer, or S3 bucket
+is required by this packaging approach. The dependency range is not a release
+lockfile; record resolved versions when preparing a future reproducible release.
+No packages were installed/upgraded and no deployment bundle was built here.
 
 ## Deployment, permissions, and costs
 
@@ -418,8 +669,38 @@ and token limits do not guarantee zero charges. The current constraints forbid
 out-of-pocket charges and account/paid-plan upgrades. No live access is enabled
 as part of this pivot.
 
-Next recommended step: run the new rule and provider fixtures locally and inspect
-their comments and provenance. Separately, manually check the available Groq
-free-tier models, quotas, and billing controls without enabling live inference.
-No credentials are needed in chat. Any future live integration needs a separate,
-explicit decision consistent with the zero-charge constraint.
+### Minimum resources and permissions for the next stage
+
+After separate approval and account eligibility checks, the minimal intended
+wiring is one API Gateway HTTP API POST route (payload v2), intake and worker
+Lambda functions, one DynamoDB table with String partition key `review_id`,
+and two CloudWatch log groups with explicit retention. Use separate execution
+roles trusted by Lambda:
+
+- Intake: `lambda:InvokeFunction` on only the configured worker function/alias;
+  log-stream creation and event writes on its own log group.
+- Worker: `dynamodb:PutItem` and `dynamodb:UpdateItem` on only the reviews table;
+  log-stream creation and event writes on its own log group. No Bedrock or
+  Lambda-invocation permissions are needed by the rules-only worker.
+- API Gateway: permission to invoke only intake, restricted to the configured
+  API/route through the Lambda resource policy. Do not expose a public worker
+  endpoint. Its event contract relies on restricted internal invocation.
+- Precreate the log groups so runtime roles do not need broad log-group creation
+  permissions. Neither function needs administrator permissions or table creation.
+- The GitHub token needs repository-scoped PR reads and comment writes; it is
+  not an AWS permission. Keep it out of intake and invocation payloads.
+
+Configure asynchronous worker retries separately (start with zero automatic
+retries), bounded event age/concurrency/timeouts, and a manual reconciliation
+procedure for failed/in-progress/uncertain records. The code does not apply
+these AWS settings or create any resources. No automatic claim reclaim exists;
+accepted intake does not guarantee worker completion or atomic exactly-once
+delivery. A dispatch timeout may occur after AWS accepted an event; reconcile
+before redelivering. Initialization failures before a claim may have no DynamoDB
+record and must remain visible through runtime errors/logs.
+
+Before creating any resources, manually verify AWS plan/service eligibility,
+quotas, and billing terms and obtain separate explicit approval. Start with
+rules-only processing; any later AI usage additionally needs verified provider
+access/quotas and authorization consistent with zero charges. No credentials
+are needed in chat. Nothing in this milestone enables live access.

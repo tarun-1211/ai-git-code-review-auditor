@@ -12,14 +12,16 @@ class AuditOutputTests(unittest.TestCase):
         self.assertEqual(sample["record"]["status"], "completed")
         self.assertEqual(sample["record"]["ai_status"], "completed")
         findings = sample["record"]["review"]["findings"]
-        self.assertEqual([finding["line"] for finding in findings], [1, 2, 3])
-        self.assertEqual([finding["severity"] for finding in findings], ["high", "high", "medium"])
+        self.assertEqual([finding["line"] for finding in findings], [1, 2, 1, 2, 3])
+        self.assertEqual([finding["severity"] for finding in findings], ["high", "high", "high", "high", "medium"])
+        self.assertEqual(sample["record"]["review_source"], "combined")
+        self.assertEqual(sample["record"]["finding_sources"], [["rules"], ["rules"], ["ai"], ["ai"], ["ai"]])
         self.assertIn("### AI review", sample["comment"])
         self.assertIn("human verification", sample["comment"])
         for line in (1, 2, 3):
             self.assertIn(f"example/app.py:{line}", sample["comment"])
-        self.assertEqual(sample["comment"].count("Reasoning:"), 3)
-        self.assertEqual(sample["comment"].count("Suggested fix:"), 3)
+        self.assertEqual(sample["comment"].count("Reasoning:"), 5)
+        self.assertEqual(sample["comment"].count("Suggested fix:"), 5)
 
     def test_rule_finding_is_identified_without_ai_claim(self):
         sample = run_sample("rule_finding")

@@ -1,5 +1,10 @@
 # Offline quality and deployment-readiness audit
 
+> Historical snapshot of the 139-test audit. The subsequent async-ready milestone
+> implements its intake/worker boundary and rules-plus-AI recommendations locally;
+> see README for the current contract and status. `audit_samples.json` is regenerated
+> from the current pipeline. Section 8 below retains the original audit comments.
+
 ## Scope and result
 
 This audit used the existing working tree and only synthetic fixtures, mocked

@@ -15,8 +15,26 @@
         "created_at": "2000-01-01T00:00:00+00:00",
         "updated_at": "2000-01-01T00:00:00+00:00",
         "review": {
-          "summary": "Three potential issues in the supplied synthetic changes require human review.",
+          "summary": "Rule checks and AI analysis completed; 5 finding(s) after exact-duplicate consolidation. Human verification is required.",
           "findings": [
+            {
+              "description": "[Rule PY-PICKLE] Pickle deserialization can execute code.",
+              "severity": "high",
+              "file": "example/app.py",
+              "line": 1,
+              "confidence": "speculative",
+              "reasoning": "Only trusted data should be unpickled; the input's origin is unknown.",
+              "suggested_fix": "Use a data-only format such as JSON for untrusted input."
+            },
+            {
+              "description": "[Rule PY-SHELL] A subprocess uses shell=True.",
+              "severity": "high",
+              "file": "example/app.py",
+              "line": 2,
+              "confidence": "speculative",
+              "reasoning": "Shell interpretation can permit command injection if command data is untrusted.",
+              "suggested_fix": "Prefer an argument list with shell=False and validate external input."
+            },
             {
               "description": "Deserializing request data with pickle may execute attacker-controlled code.",
               "severity": "high",
@@ -47,13 +65,31 @@
           ]
         },
         "base_sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
-        "review_source": "ai",
+        "review_source": "combined",
         "review_provider": "groq",
         "review_model_id": "mock-audit-model",
         "ai_status": "completed",
+        "finding_sources": [
+          [
+            "rules"
+          ],
+          [
+            "rules"
+          ],
+          [
+            "ai"
+          ],
+          [
+            "ai"
+          ],
+          [
+            "ai"
+          ]
+        ],
+        "rules_model_id": "python-security-rules-v1",
         "comment_id": 123
       },
-      "comment": "### AI review \u00b7 commit aaaaaaaaaaaa\n\nAI findings require human verification.\n\n<pre>Three potential issues in the supplied synthetic changes require human review.</pre>\n\n<pre>HIGH \u00b7 speculative \u00b7 example/app.py:1\nDeserializing request data with pickle may execute attacker-controlled code.\nReasoning: The added statement passes request_body to pickle.loads; the diff does not establish whether this data is trusted.\nSuggested fix: Use JSON for untrusted data and validate the decoded structure.</pre>\n\n<pre>HIGH \u00b7 speculative \u00b7 example/app.py:2\nA shell-enabled subprocess may permit command injection.\nReasoning: The added subprocess.run call uses shell=True; the origin of command is not visible.\nSuggested fix: Pass a validated argument list with shell=False.</pre>\n\n<pre>MEDIUM \u00b7 likely \u00b7 example/app.py:3\nAn outbound HTTP request has no visible timeout.\nReasoning: The added requests.get(url) call has no timeout argument; an unresponsive server could delay the caller.\nSuggested fix: Set explicit connect and read timeouts and handle timeout exceptions.</pre>",
+      "comment": "### AI review + rule-based security checks \u00b7 commit aaaaaaaaaaaa\n\nDeterministic checks and AI analysis completed. AI findings require human verification.\n\n<pre>Rule checks and AI analysis completed; 5 finding(s) after exact-duplicate consolidation. Human verification is required.</pre>\n\n<pre>HIGH \u00b7 speculative \u00b7 example/app.py:1\nSource: rule-based\n[Rule PY-PICKLE] Pickle deserialization can execute code.\nReasoning: Only trusted data should be unpickled; the input&#x27;s origin is unknown.\nSuggested fix: Use a data-only format such as JSON for untrusted input.</pre>\n\n<pre>HIGH \u00b7 speculative \u00b7 example/app.py:2\nSource: rule-based\n[Rule PY-SHELL] A subprocess uses shell=True.\nReasoning: Shell interpretation can permit command injection if command data is untrusted.\nSuggested fix: Prefer an argument list with shell=False and validate external input.</pre>\n\n<pre>HIGH \u00b7 speculative \u00b7 example/app.py:1\nSource: AI\nDeserializing request data with pickle may execute attacker-controlled code.\nReasoning: The added statement passes request_body to pickle.loads; the diff does not establish whether this data is trusted.\nSuggested fix: Use JSON for untrusted data and validate the decoded structure.</pre>\n\n<pre>HIGH \u00b7 speculative \u00b7 example/app.py:2\nSource: AI\nA shell-enabled subprocess may permit command injection.\nReasoning: The added subprocess.run call uses shell=True; the origin of command is not visible.\nSuggested fix: Pass a validated argument list with shell=False.</pre>\n\n<pre>MEDIUM \u00b7 likely \u00b7 example/app.py:3\nSource: AI\nAn outbound HTTP request has no visible timeout.\nReasoning: The added requests.get(url) call has no timeout argument; an unresponsive server could delay the caller.\nSuggested fix: Set explicit connect and read timeouts and handle timeout exceptions.</pre>",
       "comment_count": 1,
       "provider_requests": 1,
       "github_requests": 5,
@@ -96,9 +132,14 @@
         "review_provider": "rules",
         "review_model_id": "python-security-rules-v1",
         "ai_status": "not_run",
+        "finding_sources": [
+          [
+            "rules"
+          ]
+        ],
         "comment_id": 123
       },
-      "comment": "### Rule-based security checks \u00b7 commit aaaaaaaaaaaa\n\nAI analysis was not performed. Limited deterministic checks only.\n\n<pre>Limited deterministic Python security checks only. AI analysis was not performed. No matching rule is not proof that the changes are secure.</pre>\n\n<pre>HIGH \u00b7 speculative \u00b7 example/app.py:1\n[Rule PY-PICKLE] Pickle deserialization can execute code.\nReasoning: Only trusted data should be unpickled; the input&#x27;s origin is unknown.\nSuggested fix: Use a data-only format such as JSON for untrusted input.</pre>",
+      "comment": "### Rule-based security checks \u00b7 commit aaaaaaaaaaaa\n\nAI analysis was not performed. Limited deterministic checks only.\n\n<pre>Limited deterministic Python security checks only. AI analysis was not performed. No matching rule is not proof that the changes are secure.</pre>\n\n<pre>HIGH \u00b7 speculative \u00b7 example/app.py:1\nSource: rule-based\n[Rule PY-PICKLE] Pickle deserialization can execute code.\nReasoning: Only trusted data should be unpickled; the input&#x27;s origin is unknown.\nSuggested fix: Use a data-only format such as JSON for untrusted input.</pre>",
       "comment_count": 1,
       "provider_requests": 0,
       "github_requests": 5,
@@ -131,6 +172,7 @@
         "review_provider": "rules",
         "review_model_id": "python-security-rules-v1",
         "ai_status": "not_run",
+        "finding_sources": [],
         "comment_id": 123
       },
       "comment": "### Rule-based security checks \u00b7 commit aaaaaaaaaaaa\n\nAI analysis was not performed. Limited deterministic checks only.\n\n<pre>Limited deterministic Python security checks only. AI analysis was not performed. No matching rule is not proof that the changes are secure.</pre>\n\nNo findings reported; this is not a security guarantee.",
@@ -158,17 +200,19 @@
         "created_at": "2000-01-01T00:00:00+00:00",
         "updated_at": "2000-01-01T00:00:00+00:00",
         "review": {
-          "summary": "No findings reported for this bounded synthetic diff.",
+          "summary": "Rule checks and AI analysis completed; 0 finding(s) after exact-duplicate consolidation. Human verification is required.",
           "findings": []
         },
         "base_sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
-        "review_source": "ai",
+        "review_source": "combined",
         "review_provider": "groq",
         "review_model_id": "mock-audit-model",
         "ai_status": "completed",
+        "finding_sources": [],
+        "rules_model_id": "python-security-rules-v1",
         "comment_id": 123
       },
-      "comment": "### AI review \u00b7 commit aaaaaaaaaaaa\n\nAI findings require human verification.\n\n<pre>No findings reported for this bounded synthetic diff.</pre>\n\nNo findings reported; this is not a security guarantee.",
+      "comment": "### AI review + rule-based security checks \u00b7 commit aaaaaaaaaaaa\n\nDeterministic checks and AI analysis completed. AI findings require human verification.\n\n<pre>Rule checks and AI analysis completed; 0 finding(s) after exact-duplicate consolidation. Human verification is required.</pre>\n\nNo findings reported; this is not a security guarantee.",
       "comment_count": 1,
       "provider_requests": 1,
       "github_requests": 5,
@@ -272,10 +316,18 @@
         "review_provider": "rules",
         "review_model_id": "python-security-rules-v1",
         "ai_status": "unavailable",
+        "finding_sources": [
+          [
+            "rules"
+          ],
+          [
+            "rules"
+          ]
+        ],
         "fallback_reason": "groq_timeout",
         "comment_id": 123
       },
-      "comment": "### Rule-based security checks \u00b7 commit aaaaaaaaaaaa\n\nAI analysis was not performed. Limited deterministic checks only.\n\nAI provider unavailable; this is an explicitly configured rule-based fallback.\n\n<pre>Limited deterministic Python security checks only. AI analysis was not performed. No matching rule is not proof that the changes are secure.</pre>\n\n<pre>HIGH \u00b7 speculative \u00b7 example/app.py:1\n[Rule PY-PICKLE] Pickle deserialization can execute code.\nReasoning: Only trusted data should be unpickled; the input&#x27;s origin is unknown.\nSuggested fix: Use a data-only format such as JSON for untrusted input.</pre>\n\n<pre>HIGH \u00b7 speculative \u00b7 example/app.py:2\n[Rule PY-SHELL] A subprocess uses shell=True.\nReasoning: Shell interpretation can permit command injection if command data is untrusted.\nSuggested fix: Prefer an argument list with shell=False and validate external input.</pre>",
+      "comment": "### Rule-based security checks \u00b7 commit aaaaaaaaaaaa\n\nAI analysis was not performed. Limited deterministic checks only.\n\nAI provider unavailable; this is an explicitly configured rule-based fallback.\n\n<pre>Limited deterministic Python security checks only. AI analysis was not performed. No matching rule is not proof that the changes are secure.</pre>\n\n<pre>HIGH \u00b7 speculative \u00b7 example/app.py:1\nSource: rule-based\n[Rule PY-PICKLE] Pickle deserialization can execute code.\nReasoning: Only trusted data should be unpickled; the input&#x27;s origin is unknown.\nSuggested fix: Use a data-only format such as JSON for untrusted input.</pre>\n\n<pre>HIGH \u00b7 speculative \u00b7 example/app.py:2\nSource: rule-based\n[Rule PY-SHELL] A subprocess uses shell=True.\nReasoning: Shell interpretation can permit command injection if command data is untrusted.\nSuggested fix: Prefer an argument list with shell=False and validate external input.</pre>",
       "comment_count": 1,
       "provider_requests": 1,
       "github_requests": 5,
@@ -327,10 +379,18 @@
         "review_provider": "rules",
         "review_model_id": "python-security-rules-v1",
         "ai_status": "unavailable",
+        "finding_sources": [
+          [
+            "rules"
+          ],
+          [
+            "rules"
+          ]
+        ],
         "fallback_reason": "groq_rate_limited",
         "comment_id": 123
       },
-      "comment": "### Rule-based security checks \u00b7 commit aaaaaaaaaaaa\n\nAI analysis was not performed. Limited deterministic checks only.\n\nAI provider unavailable; this is an explicitly configured rule-based fallback.\n\n<pre>Limited deterministic Python security checks only. AI analysis was not performed. No matching rule is not proof that the changes are secure.</pre>\n\n<pre>HIGH \u00b7 speculative \u00b7 example/app.py:1\n[Rule PY-PICKLE] Pickle deserialization can execute code.\nReasoning: Only trusted data should be unpickled; the input&#x27;s origin is unknown.\nSuggested fix: Use a data-only format such as JSON for untrusted input.</pre>\n\n<pre>HIGH \u00b7 speculative \u00b7 example/app.py:2\n[Rule PY-SHELL] A subprocess uses shell=True.\nReasoning: Shell interpretation can permit command injection if command data is untrusted.\nSuggested fix: Prefer an argument list with shell=False and validate external input.</pre>",
+      "comment": "### Rule-based security checks \u00b7 commit aaaaaaaaaaaa\n\nAI analysis was not performed. Limited deterministic checks only.\n\nAI provider unavailable; this is an explicitly configured rule-based fallback.\n\n<pre>Limited deterministic Python security checks only. AI analysis was not performed. No matching rule is not proof that the changes are secure.</pre>\n\n<pre>HIGH \u00b7 speculative \u00b7 example/app.py:1\nSource: rule-based\n[Rule PY-PICKLE] Pickle deserialization can execute code.\nReasoning: Only trusted data should be unpickled; the input&#x27;s origin is unknown.\nSuggested fix: Use a data-only format such as JSON for untrusted input.</pre>\n\n<pre>HIGH \u00b7 speculative \u00b7 example/app.py:2\nSource: rule-based\n[Rule PY-SHELL] A subprocess uses shell=True.\nReasoning: Shell interpretation can permit command injection if command data is untrusted.\nSuggested fix: Prefer an argument list with shell=False and validate external input.</pre>",
       "comment_count": 1,
       "provider_requests": 1,
       "github_requests": 5,

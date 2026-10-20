@@ -17,17 +17,27 @@ def render_comment(pr, review, *, result=None):
         return html.escape(str(value)).replace("@", "&#64;")
 
     rules = isinstance(result, ReviewResult) and result.source == "rules"
-    title = "Rule-based security checks" if rules else "AI review"
+    combined = isinstance(result, ReviewResult) and result.source == "combined"
+    title = ("AI review + rule-based security checks" if combined else
+             "Rule-based security checks" if rules else "AI review")
     notice = "AI analysis was not performed. Limited deterministic checks only." if rules else "AI findings require human verification."
+    if combined:
+        notice = "Deterministic checks and AI analysis completed. " + notice
     parts = [f"### {title} · commit {pr.head_sha[:12]}", notice]
     if rules and result.ai_status == "unavailable":
         parts.append("AI provider unavailable; this is an explicitly configured rule-based fallback.")
     parts.append("<pre>" + safe(review["summary"]) + "</pre>")
-    for finding in review["findings"]:
+    provenance = result.sources_for(review) if isinstance(result, ReviewResult) else None
+    for index, finding in enumerate(review["findings"]):
         location = finding["file"] or "Location unavailable"
         if finding["line"] is not None:
             location += f":{finding['line']}"
+        source_text = ""
+        if provenance is not None:
+            labels = ["rule-based" if source == "rules" else "AI" for source in provenance[index]]
+            source_text = "Source: " + " + ".join(labels) + "\n"
         text = (f"{finding['severity'].upper()} · {finding['confidence']} · {location}\n"
+                f"{source_text}"
                 f"{finding['description']}\nReasoning: {finding['reasoning']}\n"
                 f"Suggested fix: {finding['suggested_fix']}")
         parts.append("<pre>" + safe(text) + "</pre>")
@@ -60,11 +70,11 @@ class ReviewPipeline:
             review = parse_review(result.text if result else raw, changed_lines=diff.changed_lines)
             metadata = {}
             if result is not None:
-                if ((result.source, result.ai_status) not in (("ai", "completed"), ("rules", "not_run"), ("rules", "unavailable"))
-                        or result.provider not in ("groq", "rules") or not result.model_id):
-                    raise IntegrationError("invalid_review_metadata")
                 metadata = {"review_source": result.source, "review_provider": result.provider,
-                            "review_model_id": result.model_id, "ai_status": result.ai_status}
+                            "review_model_id": result.model_id, "ai_status": result.ai_status,
+                            "finding_sources": [list(sources) for sources in result.sources_for(review)]}
+                if result.rules_model_id is not None:
+                    metadata["rules_model_id"] = result.rules_model_id
                 if result.fallback_reason is not None:
                     metadata["fallback_reason"] = result.fallback_reason
             phase = "storage_save_failed"

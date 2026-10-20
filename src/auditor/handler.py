@@ -1,9 +1,10 @@
-"""HTTP API entry point; pipeline injection enables offline integration tests."""
+"""HTTP intake with injected dispatch; legacy pipeline injection stays local."""
 
 import json
 import logging
 import os
 
+from .dispatch import Dispatcher, WorkerEventError, build_worker_event
 from .webhook import WebhookError, parse_delivery, valid_repository
 
 logger = logging.getLogger(__name__)
@@ -19,7 +20,8 @@ def _response(status_code: int, status: str) -> dict:
     }
 
 
-def lambda_handler(event: dict, context: object, *, pipeline=None) -> dict:
+def lambda_handler(event: dict, context: object, *, dispatcher: Dispatcher | None = None,
+                   pipeline=None, webhook_secret=None, allowed_repository=None) -> dict:
     if not isinstance(event, dict) or event.get("version") != "2.0":
         return _response(400, "expected_http_api_v2_event")
     request_context = event.get("requestContext")
@@ -27,9 +29,10 @@ def lambda_handler(event: dict, context: object, *, pipeline=None) -> dict:
     if not isinstance(http, dict) or http.get("method") != "POST":
         return _response(405, "method_not_allowed")
 
-    secret = os.environ.get("GITHUB_WEBHOOK_SECRET", "")
-    repository = os.environ.get("GITHUB_REPOSITORY", "")
-    if not secret.strip() or not valid_repository(repository):
+    secret = os.environ.get("GITHUB_WEBHOOK_SECRET", "") if webhook_secret is None else webhook_secret
+    repository = (os.environ.get("GITHUB_REPOSITORY", "") if allowed_repository is None
+                  else allowed_repository)
+    if not isinstance(secret, str) or not secret.strip() or not valid_repository(repository):
         logger.error("Webhook configuration is missing or invalid")
         return _response(500, "server_misconfigured")
 
@@ -47,6 +50,24 @@ def lambda_handler(event: dict, context: object, *, pipeline=None) -> dict:
     if pr is None:
         logger.info("Authenticated webhook ignored")
         return _response(200, "ignored")
+
+    if dispatcher is not None and pipeline is not None:
+        logger.error("Ambiguous intake dependencies")
+        return _response(500, "server_misconfigured")
+    if dispatcher is not None:
+        try:
+            worker_event = build_worker_event(pr)
+        except WorkerEventError as error:
+            logger.info("Worker event rejected: %s", error)
+            return _response(400, "invalid_worker_event")
+        try:
+            if dispatcher.dispatch(worker_event) is not True:
+                raise ValueError
+        except Exception:
+            logger.error("Worker dispatch failed")
+            return _response(502, "review_dispatch_failed")
+        logger.info("Worker event accepted")
+        return _response(202, "accepted")
 
     if pipeline is None:
         logger.warning("PR validated; no review pipeline is configured")

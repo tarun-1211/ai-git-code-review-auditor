@@ -27,12 +27,18 @@ class ReviewResult:
     model_id: str
     ai_status: str
     fallback_reason: str | None = None
+    finding_sources: tuple[tuple[str, ...], ...] | None = None
+    rules_model_id: str | None = None
 
     def __post_init__(self):
         if not isinstance(self.model_id, str) or not self.model_id.strip():
             raise ValueError("invalid_review_metadata")
         if self.source == "ai":
-            valid = self.provider == "groq" and self.ai_status == "completed" and self.fallback_reason is None
+            valid = self.provider in ("groq", "bedrock") and self.ai_status == "completed" and self.fallback_reason is None
+        elif self.source == "combined":
+            valid = (self.provider in ("groq", "bedrock") and self.ai_status == "completed"
+                     and self.fallback_reason is None and isinstance(self.rules_model_id, str)
+                     and bool(self.rules_model_id.strip()) and self.finding_sources is not None)
         elif self.source == "rules":
             valid = self.provider == "rules" and (
                 (self.ai_status == "not_run" and self.fallback_reason is None)
@@ -42,6 +48,23 @@ class ReviewResult:
             valid = False
         if not valid:
             raise ValueError("invalid_review_metadata")
+        if self.source != "combined" and self.rules_model_id is not None:
+            raise ValueError("invalid_review_metadata")
+        if self.finding_sources is not None:
+            allowed = {"ai", "rules"} if self.source == "combined" else {self.source}
+            if (type(self.finding_sources) is not tuple or any(
+                    type(sources) is not tuple or not sources
+                    or any(type(source) is not str or source not in allowed for source in sources)
+                    or len(set(sources)) != len(sources) for sources in self.finding_sources)):
+                raise ValueError("invalid_finding_provenance")
+
+    def sources_for(self, review):
+        sources = self.finding_sources
+        if sources is None:
+            sources = tuple((self.source,) for _ in review["findings"])
+        if len(sources) != len(review["findings"]):
+            raise ValueError("invalid_finding_provenance")
+        return sources
 
 
 class Reviewer(Protocol):
@@ -77,13 +100,16 @@ def build_reviewer(settings, *, opener=None, bedrock_client=None) -> Reviewer:
         from .rules import RuleReviewer
         return RuleReviewer(settings)
     if provider == "groq":
+        from .combined import CombinedReviewer
         from .groq import GroqReviewer
-        reviewer = GroqReviewer(settings, opener=opener)
-        if settings.enable_rule_fallback:
-            from .rules import RuleReviewer
-            return FallbackReviewer(reviewer, RuleReviewer(settings))
-        return reviewer
+        from .rules import RuleReviewer
+        return CombinedReviewer(GroqReviewer(settings, opener=opener), RuleReviewer(settings),
+                                provider="groq", model_id=settings.groq_model_id,
+                                enable_fallback=settings.enable_rule_fallback)
     if provider == "bedrock" and bedrock_client is not None:
         from .bedrock import BedrockReviewer
-        return BedrockReviewer(settings, client=bedrock_client)
+        from .combined import CombinedReviewer
+        from .rules import RuleReviewer
+        return CombinedReviewer(BedrockReviewer(settings, client=bedrock_client), RuleReviewer(settings),
+                                provider="bedrock", model_id=settings.model_id, failure_code="bedrock_failed")
     raise IntegrationError("bedrock_requires_injected_client")

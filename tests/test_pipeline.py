@@ -211,7 +211,9 @@ class PipelineTests(unittest.TestCase):
         self.assertEqual(json.loads(first["body"]), {"status": "reviewed"})
         self.assertEqual(json.loads(second["body"]), {"status": "duplicate"})
         record = items[self.pr.review_id]
-        self.assertEqual(record["review"], make_review())
+        self.assertEqual(record["review"]["findings"], make_review()["findings"])
+        self.assertIn("Rule checks and AI analysis completed", record["review"]["summary"])
+        self.assertEqual(record["finding_sources"], [["ai"]])
         self.assertEqual(record["status"], "completed")
         self.assertEqual(record["comment_id"], 123)
         self.assertEqual(record["model_id"], DEFAULT_MODEL_ID)

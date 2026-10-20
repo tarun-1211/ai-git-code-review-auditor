@@ -46,7 +46,9 @@ class ProviderPipelineTests(unittest.TestCase):
         self.assertEqual(self.github.open.call_count, 5)
         self.provider.open.assert_called_once()
         fields = self.saved_fields()
-        self.assertEqual(fields["review_source"], "ai")
+        self.assertEqual(fields["review_source"], "combined")
+        self.assertEqual(fields["finding_sources"], [["rules"], ["ai"]])
+        self.assertEqual(fields["rules_model_id"], "python-security-rules-v1")
         self.assertEqual(fields["review_provider"], "groq")
         self.assertEqual(fields["ai_status"], "completed")
         item = self.table.put_item.call_args.kwargs["Item"]
