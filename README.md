@@ -22,7 +22,7 @@ or modified this repository.
 
 ## Real PR demo setup
 
-The first live demonstration targets a separate `yxshxsmv/auditor-demo` repository
+The current live demonstration targets `yxshxsmv/Gateway-LLM-and-context-ernicher`
 using **`REVIEW_PROVIDER=rules`**. This is deterministic analysis; AI is disabled.
 The [live demo runbook](docs/live_demo.md) includes exact configuration,
 credential setup, AWS approval gates, a tested five-line fixture, live
@@ -36,13 +36,20 @@ verification commands, a 2–3 minute recording script and cleanup instructions.
 - Create: `tools.deploy_demo apply` additionally requires explicit resource
   approval, the `--approve-create-resources` flag, a validated release and private
   credentials. No existing resources are overwritten or deleted.
+- Recover: `tools.deploy_demo resume` validates recorded Lambda attempts with
+  `GetFunction` before reusing or retrying creation. A separately approved private
+  S3 package bucket avoids sending the ZIP inside Lambda's large JSON request;
+  see the current recovery section in the runbook. Runtime roles gain no S3 access.
 - Verify: `PYTHONPATH=src python3 -m tools.verify_demo --pr-number NUMBER` checks
   the actual GitHub comment against its completed DynamoDB record.
 
-The complete ZIP and Python 3.12 execution remain unverified here: dependency
-downloads and AWS STS are unreachable from the agent shell. The workflow is
-local/unpublished; nothing has been deployed or verified against a live PR.
-System Python is unchanged. A real demo requires the eventual GitHub comment,
+The matching complete ZIP is locally validated; its build manifest records the
+Python 3.12 runner execution check. Local system Python remains 3.14.7. Authenticated
+terminal inspection confirmed retained roles, log groups and DynamoDB from a
+partial deployment. Lambda creation encountered a transport closure; deployment
+completion and a real PR review remain unverified. AWS STS is unreachable from
+the agent shell, independently of the authenticated terminal's access.
+A real demo requires the eventual GitHub comment,
 webhook response, Lambda logs and matching table item; mocks do not establish it.
 
 ## Local testing

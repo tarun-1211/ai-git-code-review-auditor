@@ -17,6 +17,7 @@ def absent_clients():
     clients = {name: Mock() for name in SERVICES}
     clients['sts'].get_caller_identity.return_value = {'Account': '123456789012'}
     clients['lambda'].get_function_concurrency.side_effect = Missing()
+    clients['lambda'].get_function.side_effect = Missing()
     clients['iam'].get_role.side_effect = Missing()
     clients['dynamodb'].describe_table.side_effect = Missing()
     clients['logs'].describe_log_groups.return_value = {'logGroups': []}
@@ -26,6 +27,9 @@ def absent_clients():
 
 class DemoDeploymentTests(unittest.TestCase):
     def setUp(self):
+        sleeper = patch('tools.aws_transfer.time.sleep', return_value=None)
+        sleeper.start()
+        self.addCleanup(sleeper.stop)
         self.config = DemoConfig('student/auditor-demo')
         self.secrets = {'GITHUB_TOKEN': 'fake-private-token-for-tests',
                         'GITHUB_WEBHOOK_SECRET': 'fake-private-webhook-for-tests'}
@@ -166,7 +170,7 @@ class DemoDeploymentTests(unittest.TestCase):
                 ApiId='demoid', IntegrationType='AWS_PROXY', IntegrationUri='fake-function-arn',
                 PayloadFormatVersion='2.0', TimeoutInMillis=10000)
 
-    def test_partial_failure_keeps_journal_and_never_retries_or_deletes_resources(self):
+    def test_partial_failure_keeps_journal_and_retries_only_after_confirmed_absence(self):
         clients = absent_clients()
         clients['lambda'].create_function.side_effect = TimeoutError('PRIVATE_CREDENTIAL')
         with tempfile.TemporaryDirectory() as directory, patch('tools.deploy_demo.release_artifact',
@@ -174,7 +178,26 @@ class DemoDeploymentTests(unittest.TestCase):
             artifact, journal = self.ready_apply(directory, clients)
             with self.assertRaisesRegex(DeploymentError, '^deployment_failed_or_uncertain_resources_retained_check_journal_and_console$'):
                 apply(self.config, clients, artifact, self.secrets, journal, approved=True)
-            self.assertEqual(clients['lambda'].create_function.call_count, 1)
+            self.assertEqual(clients['lambda'].create_function.call_count, 2)
+            self.assertEqual(clients['lambda'].get_function.call_count, 7)
             self.assertEqual(json.loads(journal.read_text())['status'], 'failed_or_uncertain_manual_reconciliation_required')
             self.assertNotIn('PRIVATE_CREDENTIAL', journal.read_text())
             self.assertFalse(any(call[0].startswith('delete') for client in clients.values() for call in client.mock_calls))
+
+    def test_failure_records_the_exact_operation_and_safe_aws_code(self):
+        class Rejection(Exception):
+            response = {'Error': {'Code': 'AccessDeniedException',
+                         'Message': 'PRIVATE_CREDENTIAL not authorized to perform: iam:PassRole'}}
+        clients = absent_clients()
+        clients['lambda'].create_function.side_effect = Rejection()
+        with tempfile.TemporaryDirectory() as directory, patch('tools.deploy_demo.release_artifact',
+                return_value={'sha256': 'a' * 64}):
+            artifact, journal = self.ready_apply(directory, clients)
+            with self.assertRaises(DeploymentError):
+                apply(self.config, clients, artifact, self.secrets, journal, approved=True)
+            saved = json.loads(journal.read_text())
+            self.assertEqual(saved['failure']['operation'], 'lambda.create_function')
+            self.assertEqual(saved['failure']['resource'], WORKER)
+            self.assertEqual(saved['failure']['error_code'], 'AccessDeniedException')
+            self.assertEqual(saved['failure']['denied_action'], 'iam:PassRole')
+            self.assertNotIn('PRIVATE_CREDENTIAL', journal.read_text())

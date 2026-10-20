@@ -95,7 +95,7 @@ sys.modules['boto3'] = sys.modules['botocore'] = None
 def forbidden(*a, **k): raise AssertionError('network forbidden')
 socket.create_connection = forbidden
 socket.socket.connect = forbidden
-import tools.build_lambda, tools.deploy_demo, tools.verify_demo
+import tools.build_lambda, tools.deploy_demo, tools.verify_demo, tools.inspect_deployment
 print('safe')
 '''
         done = subprocess.run([sys.executable, '-c', program], capture_output=True, text=True, timeout=10)
