@@ -50,6 +50,20 @@ dependency. They cover success, duplicate claims, malformed AI responses,
 incomplete diffs, stale commits, dependency failures, ambiguous comment delivery,
 and safe errors. The original webhook and findings tests remain in the suite.
 
+### Offline quality and deployment-readiness audit
+
+See [the audit report](docs/offline_audit.md) for representative comments,
+validation limits, configuration requirements, and the missing asynchronous
+deployment components. [Captured outputs](docs/audit_samples.json) contain only
+synthetic code, fake identifiers, and mocked service results. Regenerate them with:
+
+```bash
+PYTHONPATH=src python3 -m tests.audit_samples > docs/audit_samples.json
+```
+
+This command blocks network connections, SDK imports, and real HTTP transport
+construction, injects every dependency, and leaves live-provider flags false.
+
 ## How the pipeline works
 
 ```mermaid
@@ -349,6 +363,11 @@ export GITHUB_TOKEN
 Existing Settings still require backend repository/token, region, and table
 configuration. All local tests supply fake values and injected transports;
 these fields do not require creating an AWS table or providing real credentials.
+The current webhook-only handler reads only the repository and webhook secret;
+it never calls `Settings.from_env()`. The token is a GitHub worker setting,
+and the region/table describe DynamoDB persistence, not a separate backend
+server. The legacy Bedrock model value is also still validated by Settings,
+even for Groq/rules (its default means no Bedrock environment setting is needed).
 For local deterministic work, select `REVIEW_PROVIDER=rules` and leave both live
 flags false. The offline tests are the supported local entry point; setting
 configuration variables does not itself run a pipeline or post a comment.

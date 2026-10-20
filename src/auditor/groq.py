@@ -72,9 +72,14 @@ class GroqReviewer:
                     if response.status in (401, 403) or response.status >= 500:
                         raise ProviderUnavailable("groq_unavailable")
                     raise IntegrationError("groq_http_error")
+                # HTTPResponse.read(size) can return a short body without
+                # raising IncompleteRead. Preserve the declared remaining size.
+                expected_bytes = getattr(response, "length", None)
                 raw = response.read(settings.groq_max_response_bytes + 1)
             if len(raw) > settings.groq_max_response_bytes:
                 raise IntegrationError("groq_response_too_large")
+            if type(expected_bytes) is int and len(raw) != expected_bytes:
+                raise IntegrationError("incomplete_provider_response")
             result = json.loads(raw.decode("utf-8"), object_pairs_hook=_unique_object,
                                 parse_constant=_reject_constant)
             choices = result["choices"]

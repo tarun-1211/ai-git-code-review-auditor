@@ -44,9 +44,13 @@ class GitHubClient:
             with self._opener.open(request, timeout=10) as response:
                 if response.status != (200 if body is None else 201):
                     raise IntegrationError("github_request_failed")
+                # A bounded read does not itself enforce Content-Length.
+                expected_bytes = getattr(response, "length", None)
                 raw = response.read(limit + 1)
             if len(raw) > limit:
                 raise SkipReview("github_response_too_large")
+            if type(expected_bytes) is int and len(raw) != expected_bytes:
+                raise IntegrationError("github_request_failed")
             return json.loads(raw.decode("utf-8"))
         except (IntegrationError, SkipReview):
             raise
